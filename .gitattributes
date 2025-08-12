@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+*.js linguist-language=JavaScript
+*.ts linguist-language=TypeScript
+*.vue linguist-language=Vue
+*.md  linguist-language=Markdown
+*.json linguist-language=JSON
+*.yml linguist-language=YAML
+*.yaml linguist-language=YAML
+
+# Improve diffs for lock files
+package-lock.json -diff
+pnpm-lock.yaml -diff
+yarn.lock -diff
+
+
