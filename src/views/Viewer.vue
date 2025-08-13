@@ -113,14 +113,15 @@ function undo() {
   annotations.value = JSON.parse(prev)
   renderPage()
 }
-function redo() {
+// 保留原重做逻辑备用（未在 UI 暴露）
+/* function redo() {
   const next = redoStack.value.pop()
   if (!next) return
   const cur = JSON.stringify(annotations.value)
   undoStack.value.push(cur)
   annotations.value = JSON.parse(next)
   renderPage()
-}
+} */
 
 async function loadPdf(urlOrData: string | ArrayBuffer) {
   try {
@@ -208,7 +209,8 @@ function fitWidth() {
     const viewport = page.getViewport({ scale: 1, rotation: rotation.value })
     const stageWidth = stageRef.value!.clientWidth - 24 // padding
     scale.value = Math.max(0.1, stageWidth / viewport.width)
-    renderPage()
+    // 编辑时避免与拖动操作并发刷新画布
+    if (!isEditingMode.value) renderPage()
   })
 }
 function fitPage() {
@@ -220,7 +222,7 @@ function fitPage() {
     const scaleX = stageWidth / viewport.width
     const scaleY = stageHeight / viewport.height
     scale.value = Math.max(0.1, Math.min(scaleX, scaleY))
-    renderPage()
+    if (!isEditingMode.value) renderPage()
   })
 }
 function rotateClockwise() {
@@ -495,8 +497,9 @@ function pdfRectToViewportRect(pdfRect: { x: number; y: number; w: number; h: nu
 async function renderAnnotationsForCurrentPage(_page: any) {
   const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
   if (!overlay || !canvasRef.value) return
-  overlay.style.width = `${canvasRef.value.width}px`
-  overlay.style.height = `${canvasRef.value.height}px`
+  const rect = canvasRef.value.getBoundingClientRect()
+  overlay.style.width = `${rect.width}px`
+  overlay.style.height = `${rect.height}px`
   overlay.innerHTML = ''
   const list = annotations.value[pageNum.value] || []
   for (const a of list) {
@@ -643,7 +646,13 @@ function onAnnoMouseMove(ev: MouseEvent) {
     if (a) {
       a.x = (draggingOriginPdf.x + dx)
       a.y = (draggingOriginPdf.y + dy)
-      renderPage()
+      // 清空文本锚点，确保文本在拖动时根据 PDF 坐标实时转换
+      if (a.type === 'text') {
+        a.vx = undefined
+        a.vy = undefined
+      }
+      // 仅重绘注释覆盖层，避免触发 PDF 画布的并发渲染
+      renderAnnotationsForCurrentPage(null as any)
     }
     return
   }
@@ -713,7 +722,8 @@ function onAnnoMouseUp(ev: MouseEvent) {
   // remove preview
   const temp = document.getElementById('anno-preview')
   if (temp?.parentElement) temp.parentElement.removeChild(temp)
-  renderPage()
+  // 完成绘制后仅刷新注释层，避免触发 PDF 并发渲染
+  renderAnnotationsForCurrentPage(null as any)
 }
 
 function startEditAnnotation(id: string) {
@@ -827,6 +837,19 @@ function cancelTextEditor() {
   renderPage()
 }
 
+function clearAllEdits() {
+  // 关闭可能存在的文本编辑器
+  const input = document.getElementById('anno-editor') as HTMLTextAreaElement | null
+  if (input) input.remove()
+  // 快照当前状态，便于撤销恢复
+  snapshot()
+  // 清空所有页的注释
+  annotations.value = {}
+  editingAnnoId.value = null
+  // 仅重绘注释层，避免触发 PDF 并发渲染
+  renderAnnotationsForCurrentPage(null as any)
+}
+
 function autoResizeTextarea(el: HTMLTextAreaElement) {
   // 单行自适应：先重置高度，再按滚动高度设置，同时限制为 1 行高
   el.style.height = '1px'
@@ -870,7 +893,7 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
       <label>字体:</label>
       <input style="width:60px" type="number" v-model.number="textFontSize" min="8" max="72" />
       <button @click="undo">撤销</button>
-      <button @click="redo">重做</button>
+      <button @click="clearAllEdits">重做</button>
     </div>
     <div class="content">
       <aside class="sidebar">
