@@ -7,6 +7,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue()],
     server: {
+      host: true, // 0.0.0.0，允许局域网访问
+      port: Number(env.VITE_PORT || 5173),
+      strictPort: true,
       proxy: env.VITE_STIRLING_BASE_URL
         ? {
             '/stirling': {
@@ -16,6 +19,11 @@ export default defineConfig(({ mode }) => {
             },
           }
         : undefined,
+    },
+    preview: {
+      host: true,
+      port: Number(env.VITE_PREVIEW_PORT || 4173),
+      strictPort: true,
     },
   }
 })
