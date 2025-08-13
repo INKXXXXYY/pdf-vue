@@ -4,6 +4,8 @@ import vue from '@vitejs/plugin-vue'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  // fallback for API base if .env not present
+  if (!env.VITE_API_BASE_URL) env.VITE_API_BASE_URL = 'http://localhost:3000'
   return {
     plugins: [vue()],
     server: {
