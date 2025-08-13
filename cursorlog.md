@@ -138,8 +138,7 @@
   - `POST /api/annotate/flatten`：参数支持 `file`(PDF) 或 `url` + `annotations`(JSON)。
   - 使用 `pdf-lib` 在服务端按与前端一致的规则扁平化注释（文本基线补偿、高亮透明度/边框、矩形描边）。
   - CORS 允许来自前端域；上传大小默认 50MB。
-<<<<<<< HEAD
- - Vite 代理：新增 `/api` 代理到 `VITE_API_BASE_URL`，缺省回落到 `http://localhost:3000`；前端新增“服务端导出”按钮。
+- Vite 代理：新增 `/api` 代理到 `VITE_API_BASE_URL`，缺省回落到 `http://localhost:3000`；前端新增“服务端导出”按钮。
 - 待办：
   - 与 Stirling PDF 对接通用处理接口（合并/拆分/压缩/OCR 等）。
   - 任务制与进度上报、鉴权与限流。
