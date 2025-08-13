@@ -69,6 +69,8 @@ let draggingAnnoId: string | null = null
 let draggingStartPdf: { x: number; y: number } | null = null
 let draggingOriginPdf: { x: number; y: number } | null = null
 const lastViewport: any = ref(null)
+// keep original PDF bytes for export
+let originalPdfBytes: ArrayBuffer | null = null
 // persistence helpers
 const autoSaveEnabled = ref(true)
 let saveTimer: any = null
@@ -132,8 +134,20 @@ function undo() {
 async function loadPdf(urlOrData: string | ArrayBuffer) {
   try {
     errorMessage.value = ''
-    const loadingTask =
-      typeof urlOrData === 'string' ? getDocument(urlOrData) : getDocument({ data: urlOrData })
+    let loadingTask
+    if (typeof urlOrData === 'string') {
+      loadingTask = getDocument(urlOrData)
+      // capture original bytes for later export
+      try {
+        const resp = await fetch(urlOrData)
+        originalPdfBytes = await resp.arrayBuffer()
+      } catch { originalPdfBytes = null }
+    } else {
+      // keep a safe copy for export; pass the original to PDF.js (which may detach it)
+      const dataAb = urlOrData as ArrayBuffer
+      try { originalPdfBytes = dataAb.slice(0) } catch { originalPdfBytes = dataAb }
+      loadingTask = getDocument({ data: dataAb })
+    }
     pdfDoc = await loadingTask.promise
     numPages.value = pdfDoc.numPages
     pageNum.value = 1
@@ -398,54 +412,49 @@ function onImportJsonFile(e: Event) {
 
 async function exportPdf() {
   if (!pdfDoc) return alert('请先加载 PDF 文件')
+  if (!originalPdfBytes) return alert('无法获取源 PDF 字节，无法导出。请通过上传或 URL 方式加载。')
   // 逐页将注释层扁平化到新 PDF
   const newPdf = await PDFDocument.create()
-  let srcPdfBytes: ArrayBuffer | null = null
-  try {
-    const url = (pdfDoc as any).url as string | undefined
-    if (url) {
-      const resp = await fetch(url)
-      srcPdfBytes = await resp.arrayBuffer()
-    }
-  } catch {
-    srcPdfBytes = null
-  }
-  const srcPdf = srcPdfBytes ? await PDFDocument.load(srcPdfBytes) : null
+  const srcPdf = await PDFDocument.load(originalPdfBytes)
+  const helv = await newPdf.embedFont(StandardFonts.Helvetica)
   for (let p = 1; p <= pdfDoc.numPages; p++) {
     // 将原始页面嵌入
-    let embedded
-    if (srcPdf) {
-      embedded = (await newPdf.copyPages(srcPdf, [p - 1]))[0]
-    } else {
-      // 无法获取源字节时，创建空白页作为兜底
-      embedded = newPdf.addPage()
-      continue
-    }
+    const embedded = (await newPdf.copyPages(srcPdf, [p - 1]))[0]
     newPdf.addPage(embedded)
     const target = newPdf.getPage(p - 1)
     const list = annotations.value[p] || []
     // 渲染注释到该页
     for (const a of list) {
       if (a.type === 'text') {
-        const font = await newPdf.embedFont(StandardFonts.Helvetica)
         const size = a.fontSize || 14
         const color = a.color || '#111827'
         const rgbColor = hexToRgb(color)
         target.drawText(a.text || '', {
           x: a.x,
-          y: a.y,
+          // align exported text visually with overlay top-left anchor
+          y: a.y - size,
           size,
-          font,
+          font: helv,
           color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
         })
       } else if (a.type === 'highlight') {
         const color = a.color || '#facc15'
         const c = hexToRgb(color)
-        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, color: rgb(c.r, c.g, c.b), opacity: 0.35 })
+        target.drawRectangle({
+          x: a.x,
+          y: a.y,
+          width: a.w,
+          height: a.h,
+          color: rgb(c.r, c.g, c.b),
+          opacity: 0.35,
+          borderColor: rgb(c.r, c.g, c.b),
+          borderWidth: 1,
+          borderOpacity: 0.6,
+        })
       } else if (a.type === 'rect') {
         const color = a.color || '#f59e0b'
         const c = hexToRgb(color)
-        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(c.r, c.g, c.b), borderWidth: 2, opacity: 1, color: undefined })
+        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(c.r, c.g, c.b), borderWidth: 2, borderOpacity: 1, color: undefined })
       }
     }
   }
@@ -670,15 +679,18 @@ async function renderAnnotationsForCurrentPage(_page: any) {
     div.className = `anno ${a.type}`
     div.dataset.id = a.id
     div.style.position = 'absolute'
-    if (a.type !== 'text') {
+      if (a.type !== 'text') {
       const r = pdfRectToViewportRect(a)
       div.style.left = `${r.x}px`
       div.style.top = `${r.y}px`
       div.style.width = `${r.w}px`
       div.style.height = `${r.h}px`
       if (a.type === 'highlight') {
-        div.style.background = a.color || 'rgba(250, 204, 21, 0.35)'
-        div.style.outline = '1px solid rgba(234,179,8,0.6)'
+        // match export: semi-transparent fill + subtle border
+        const fill = a.color || '#facc15'
+        const c = hexToRgb(fill)
+        div.style.background = `rgba(${Math.round(c.r*255)}, ${Math.round(c.g*255)}, ${Math.round(c.b*255)}, 0.35)`
+        div.style.outline = `1px solid rgba(${Math.round(c.r*255)}, ${Math.round(c.g*255)}, ${Math.round(c.b*255)}, 0.6)`
       } else if (a.type === 'rect') {
         div.style.border = `2px solid ${a.color || '#f59e0b'}`
         div.style.background = 'transparent'
