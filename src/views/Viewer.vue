@@ -68,6 +68,10 @@ let draggingAnnoId: string | null = null
 let draggingStartPdf: { x: number; y: number } | null = null
 let draggingOriginPdf: { x: number; y: number } | null = null
 const lastViewport: any = ref(null)
+// persistence helpers
+const autoSaveEnabled = ref(true)
+let saveTimer: any = null
+let currentDocKey: string | null = null
 // 编辑模式下强制整页适配并锁定缩放/旋转
 const isEditingMode = computed(() => toolMode.value !== 'select')
 // const lockFitPage = ref(false)
@@ -112,6 +116,7 @@ function undo() {
   redoStack.value.push(cur)
   annotations.value = JSON.parse(prev)
   renderPage()
+  scheduleAutoSave()
 }
 // 保留原重做逻辑备用（未在 UI 暴露）
 /* function redo() {
@@ -134,6 +139,12 @@ async function loadPdf(urlOrData: string | ArrayBuffer) {
     rotation.value = 0
     await renderPage()
     await Promise.all([renderThumbnails(), loadOutline()])
+    // persistence: derive doc key and try load annotations
+    try {
+      currentDocKey = await deriveDocKey(urlOrData)
+      await loadAnnotationsFromStorage()
+      await renderPage()
+    } catch {}
     // reset search state on new file
     searchMatches.value = []
     currentMatchIndex.value = 0
@@ -406,6 +417,48 @@ function round3(n: number) {
   return Math.round(n * 1000) / 1000
 }
 
+// === Persistence helpers ===
+async function deriveDocKey(urlOrData: string | ArrayBuffer): Promise<string> {
+  if (typeof urlOrData === 'string') return 'url:' + urlOrData
+  const data = new Uint8Array(urlOrData)
+  let hash = 0x811c9dc5 >>> 0
+  for (let i = 0; i < data.length; i++) {
+    hash ^= data[i]
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0
+  }
+  return 'buf:' + hash.toString(16)
+}
+
+function scheduleAutoSave() {
+  if (!autoSaveEnabled.value) return
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    saveAnnotationsToStorage()
+  }, 300)
+}
+
+function saveAnnotationsToStorage() {
+  try {
+    if (!currentDocKey) return
+    localStorage.setItem('pdf-annotations:' + currentDocKey, JSON.stringify(annotations.value))
+  } catch {}
+}
+
+async function loadAnnotationsFromStorage() {
+  try {
+    if (!currentDocKey) return
+    const raw = localStorage.getItem('pdf-annotations:' + currentDocKey)
+    if (raw) {
+      const obj = JSON.parse(raw)
+      annotations.value = obj || {}
+    } else {
+      annotations.value = {}
+    }
+  } catch {
+    annotations.value = {}
+  }
+}
+
 async function getRectsForPage(page: any, queryLower: string) {
   const rects: Array<{ x: number; y: number; w: number; h: number }> = []
     const textContent = await page.getTextContent()
@@ -653,6 +706,7 @@ function onAnnoMouseMove(ev: MouseEvent) {
       }
       // 仅重绘注释覆盖层，避免触发 PDF 画布的并发渲染
       renderAnnotationsForCurrentPage(null as any)
+      scheduleAutoSave()
     }
     return
   }
@@ -724,6 +778,7 @@ function onAnnoMouseUp(ev: MouseEvent) {
   if (temp?.parentElement) temp.parentElement.removeChild(temp)
   // 完成绘制后仅刷新注释层，避免触发 PDF 并发渲染
   renderAnnotationsForCurrentPage(null as any)
+  scheduleAutoSave()
 }
 
 function startEditAnnotation(id: string) {
@@ -819,6 +874,7 @@ function commitTextEditor() {
   input.remove()
   editingAnnoId.value = null
   renderPage()
+  scheduleAutoSave()
 }
 
 function cancelTextEditor() {

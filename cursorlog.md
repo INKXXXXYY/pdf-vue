@@ -114,6 +114,9 @@
   - 文本渲染采用三位小数 `round3`，日志与样式统一；强制 `.anno` 绝对定位，修复 `position: static` 导致 `left/top` 无效。
   - 文本编辑器：透明背景、单行高度自适应、不可 resize，边框可见以不遮挡底部 PDF。
   - 拖动与绘制期间仅调用 `renderAnnotationsForCurrentPage`，避免并发 `render()` 报错。
+- 新增（持久化与键盘细调）：
+  - 本地存储 `localStorage`：按文档键（URL 或 ArrayBuffer FNV-1a hash）保存/恢复 `annotations`，编辑时 300ms 防抖自动保存。
+  - 键盘细调与对齐（预备）：添加工具变量与方法骨架（选中项、自动保存调度、网格吸附函数与像素→PDF 的增量换算）。
 - 标签与分支：
   - `snapshot-eaea063` / `stable-eaea063`：文本坐标对齐版本。
   - `snapshot-6134fe5` / `stable-6134fe5`：清空重做与并发渲染优化版本。
