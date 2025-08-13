@@ -92,7 +92,7 @@
   - 注释覆盖层 `#anno-overlay`：支持工具模式（选择/文本/高亮矩形/矩形）；
   - 文本：点击弹窗输入文本，按 PDF 坐标存储，渲染时按当前 scale 转换字号；
   - 高亮矩形/矩形：拖拽绘制，颜色可配置；
-  - 选择移动：选择模式下可拖动注释，自动重绘；
+  - 选择移动：选择模式下可拖动注释，仅重绘覆盖层避免 PDF.js 同一画布并发渲染；
   - 撤销/重做：基于注释 JSON 快照；
   - 坐标转换：使用 `viewport.convertToPdfPoint`、`convertToViewportRectangle` 做 PDF ↔ 画布坐标转换，支持旋转缩放。
 - 待优化/坑：
@@ -104,6 +104,19 @@
   - 旋转与适配：旋转后需重新计算视口尺寸再求 scale；
   - 书签目的地：有的条目无 `dest`，需判空；
   - 事件抖动：频繁渲染可加 loading/节流，当前先保守处理。
+
+2025-08-13 定位精度与编辑体验改进
+
+- 目标：文本坐标与鼠标移动日志对齐；输入框可视与落点一致；拖动不触发 PDF 并发渲染报错。
+- 变更：
+  - 统一 `#hl-overlay`/`#anno-overlay` 尺寸为画布 CSS 尺寸，显式 `left/top:0`，以画布左上为原点。
+  - 鼠标事件以画布 `getBoundingClientRect()` 为基准计算 overlay 坐标；缓存 `lastPdfPoint`，文本放置使用缓存 PDF 坐标。
+  - 文本渲染采用三位小数 `round3`，日志与样式统一；强制 `.anno` 绝对定位，修复 `position: static` 导致 `left/top` 无效。
+  - 文本编辑器：透明背景、单行高度自适应、不可 resize，边框可见以不遮挡底部 PDF。
+  - 拖动与绘制期间仅调用 `renderAnnotationsForCurrentPage`，避免并发 `render()` 报错。
+- 标签与分支：
+  - `snapshot-eaea063` / `stable-eaea063`：文本坐标对齐版本。
+  - `snapshot-6134fe5` / `stable-6134fe5`：清空重做与并发渲染优化版本。
 
 
 
