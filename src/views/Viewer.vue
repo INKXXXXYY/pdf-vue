@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch, computed, nextTick } from 'vue'
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 // @ts-ignore - vite can bundle this entry as worker
@@ -350,6 +351,115 @@ async function runSearch() {
     await renderPage()
     scrollToCurrentMatch()
   }
+}
+
+// ===== Export / Save =====
+function serializeAnnotations(): Record<number, any[]> {
+  return annotations.value
+}
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+function saveAnnotationsJson() {
+  const data = serializeAnnotations()
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  saveBlob(blob, `annotations-page${pageNum.value}.json`)
+}
+
+function triggerImportJson() {
+  const el = document.getElementById('import-json') as HTMLInputElement | null
+  if (el) el.click()
+}
+
+function onImportJsonFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  file.text().then((text) => {
+    try {
+      const obj = JSON.parse(text)
+      annotations.value = obj || {}
+      renderPage()
+    } catch (err) {
+      alert('无效的 JSON 文件')
+    }
+  })
+  ;(e.target as HTMLInputElement).value = ''
+}
+
+async function exportPdf() {
+  if (!pdfDoc) return alert('请先加载 PDF 文件')
+  // 逐页将注释层扁平化到新 PDF
+  const newPdf = await PDFDocument.create()
+  let srcPdfBytes: ArrayBuffer | null = null
+  try {
+    const url = (pdfDoc as any).url as string | undefined
+    if (url) {
+      const resp = await fetch(url)
+      srcPdfBytes = await resp.arrayBuffer()
+    }
+  } catch {
+    srcPdfBytes = null
+  }
+  const srcPdf = srcPdfBytes ? await PDFDocument.load(srcPdfBytes) : null
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    // 将原始页面嵌入
+    let embedded
+    if (srcPdf) {
+      embedded = (await newPdf.copyPages(srcPdf, [p - 1]))[0]
+    } else {
+      // 无法获取源字节时，创建空白页作为兜底
+      embedded = newPdf.addPage()
+      continue
+    }
+    newPdf.addPage(embedded)
+    const target = newPdf.getPage(p - 1)
+    const list = annotations.value[p] || []
+    // 渲染注释到该页
+    for (const a of list) {
+      if (a.type === 'text') {
+        const font = await newPdf.embedFont(StandardFonts.Helvetica)
+        const size = a.fontSize || 14
+        const color = a.color || '#111827'
+        const rgbColor = hexToRgb(color)
+        target.drawText(a.text || '', {
+          x: a.x,
+          y: a.y,
+          size,
+          font,
+          color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
+        })
+      } else if (a.type === 'highlight') {
+        const color = a.color || '#facc15'
+        const c = hexToRgb(color)
+        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, color: rgb(c.r, c.g, c.b), opacity: 0.35 })
+      } else if (a.type === 'rect') {
+        const color = a.color || '#f59e0b'
+        const c = hexToRgb(color)
+        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(c.r, c.g, c.b), borderWidth: 2, opacity: 1, color: undefined })
+      }
+    }
+  }
+  const pdfBytes = await newPdf.save()
+  saveBlob(new Blob([pdfBytes], { type: 'application/pdf' }), 'exported.pdf')
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace('#', '')
+  const bigint = parseInt(h, 16)
+  const r = (bigint >> 16) & 255
+  const g = (bigint >> 8) & 255
+  const b = bigint & 255
+  return { r: r / 255, g: g / 255, b: b / 255 }
 }
 function nextMatch() {
   if (flatMatches.value.length === 0) return
@@ -950,6 +1060,11 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
       <input style="width:60px" type="number" v-model.number="textFontSize" min="8" max="72" />
       <button @click="undo">撤销</button>
       <button @click="clearAllEdits">重做</button>
+      <div class="sep" />
+      <button @click="exportPdf">导出PDF</button>
+      <button @click="saveAnnotationsJson">导出JSON</button>
+      <button @click="triggerImportJson">导入JSON</button>
+      <input id="import-json" type="file" accept="application/json" style="display:none" @change="onImportJsonFile" />
     </div>
     <div class="content">
       <aside class="sidebar">
