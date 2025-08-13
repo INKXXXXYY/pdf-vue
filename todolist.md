@@ -43,7 +43,7 @@
   - [ ] 文本框缩放与旋转。
 - [ ] Replace Text（替换文本）：对现有 PDF 文本做替换（基于文本提取与坐标回填）。
 - [x] Highlight（高亮）：文本/区域高亮（预览与导出透明度一致）。
-- [ ] Add Image（添加图片）：插入/缩放/旋转图片，导出扁平化。
+  - [x] Add Image（添加图片）：插入/拖动/缩放/旋转图片，导出扁平化（基础能力已实现）。
 - [ ] Eraser（橡皮擦）：擦除选中元素/自由擦除绘图。
 - [ ] Shapes（形状）：多形状（椭圆、箭头、线段、多边形）。
 - [ ] Draw（绘图）：自由画笔（颜色/粗细/压感可选）。
@@ -65,7 +65,7 @@
   - [x] 使用 `pdf-lib` 将注释扁平化到新 PDF（文本/高亮矩形/矩形）。
 - [x] 导出（服务端方案）：
   - [x] 自建后端 `/api/annotate/flatten`：接收原 PDF 或 URL + 注释 JSON，服务端用 `pdf-lib` 扁平化导出。
-  - [x] 前端按钮“服务端导出”与代理 `/api` 打通。
+  - [x] 前端按钮“服务端导出”与代理 `/api` 打通（VITE_API_BASE_URL 缺省回落到 http://localhost:3000）。
   - [ ] 与 Stirling PDF 对接（合并/拆分/压缩/OCR 等通用能力）。
 
 ### 第 5 阶段：Stirling PDF 能力透出
@@ -86,6 +86,7 @@
 ### 版本管理
 - [x] 初始化 Git 仓库，提交基线并创建 `v0.1.0` 标签。
 - [ ] 设置远端仓库并推送：`git remote add origin <repo_url>`；`git push -u origin master --tags`。
+  - [ ] 若远端有更新，使用 `git pull --rebase` 解决冲突再推送。
 - [ ] 规范提交信息与分支策略（约定式提交、feature/bugfix/release 分支）。
  - [x] 创建可回退快照：`snapshot-eaea063`、`stable-eaea063`（对齐文本坐标阶段）。
  - [x] 创建可回退快照：`snapshot-6134fe5`、`stable-6134fe5`（清空重做与拖动并发渲染修复）。
