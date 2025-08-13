@@ -1,8 +1,7 @@
-const express = require('express')
-const multer = require('multer')
-const cors = require('cors')
-const fetch = require('node-fetch')
-const { PDFDocument, rgb, StandardFonts } = require('pdf-lib')
+import express from 'express'
+import multer from 'multer'
+import cors from 'cors'
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 
 const app = express()
 app.use(cors({ origin: process.env.ALLOW_ORIGIN || true }))

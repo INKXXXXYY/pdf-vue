@@ -51,6 +51,7 @@ type Annotation = {
   color?: string
   fontSize?: number
   src?: string // for image
+  rotationDeg?: number
   // 视口锚点（用于首次渲染保障与点击点像素级一致）
   vx?: number
   vy?: number
@@ -85,6 +86,13 @@ let lastMoveLogTs = 0
  let lastOverlayPoint: { x: number; y: number } | null = null
  let lastViewportPoint: { x: number; y: number } | null = null
  let lastPdfPoint: { x: number; y: number } | null = null
+const selectedAnnoId = ref<string | null>(null)
+let resizingHandle: 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w' | null = null
+let resizingStartRect: { x: number; y: number; w: number; h: number } | null = null
+let resizingStartOverlay: { x: number; y: number; w: number; h: number; hx: number; hy: number } | null = null
+let rotating = false
+let rotateCenterOverlay: { x: number; y: number } | null = null
+let rotateStartAngle = 0
 function getOverlayMetrics() {
   const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
   const canvas = canvasRef.value
@@ -462,7 +470,27 @@ async function exportPdf() {
         try {
           const pngBytes = dataUrlToBytes(a.src)
           const png = await newPdf.embedPng(pngBytes).catch(async () => await newPdf.embedJpg(pngBytes))
-          target.drawImage(png, { x: a.x, y: a.y, width: a.w, height: a.h })
+          const rot = (a.rotationDeg || 0)
+          const rad = rot * Math.PI / 180
+          const cx = a.x + a.w / 2
+          const cy = a.y + a.h / 2
+          const cos = Math.cos(rad)
+          const sin = Math.sin(rad)
+          // compute four corners after rotation around center
+          const corners = [
+            { x: -a.w/2, y: -a.h/2 },
+            { x:  a.w/2, y: -a.h/2 },
+            { x:  a.w/2, y:  a.h/2 },
+            { x: -a.w/2, y:  a.h/2 },
+          ].map(p => ({ x: cx + p.x * cos - p.y * sin, y: cy + p.x * sin + p.y * cos }))
+          const xs = corners.map(c => c.x)
+          const ys = corners.map(c => c.y)
+          const minX = Math.min(...xs)
+          const minY = Math.min(...ys)
+          const maxX = Math.max(...xs)
+          const maxY = Math.max(...ys)
+          // draw unrotated image inside its axis-aligned bounding box as approximation
+          target.drawImage(png, { x: minX, y: minY, width: maxX - minX, height: maxY - minY })
         } catch {}
       }
     }
@@ -489,6 +517,8 @@ function dataUrlToBytes(dataUrl: string): Uint8Array {
   return bytes
 }
 
+// reserved helper for potential future precise conversions
+
 function triggerPickImage() {
   const el = document.getElementById('img-file') as HTMLInputElement | null
   if (el) el.click()
@@ -499,15 +529,41 @@ function onPickImageFile(e: Event) {
   if (!file) return
   const reader = new FileReader()
   reader.onload = () => {
-    const src = String(reader.result || '')
+    // 使用原始文件二进制生成 object URL，避免 base64 膨胀和质量损失
+    const blob = new Blob([file], { type: file.type || 'image/*' })
+    const src = URL.createObjectURL(blob)
     const img = new Image()
     img.onload = () => {
-      pendingImage.value = { src, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight }
-      toolMode.value = 'image'
+      // place to page center immediately
+      if (!lastViewport.value) return
+      const m = getOverlayMetrics()
+      if (!m) return
+      const centerOv = { x: m.rect.width / 2, y: m.rect.height / 2 }
+      const vp = overlayPointToViewportPoint(centerOv.x, centerOv.y)
+      const pdfPt = lastViewport.value.convertToPdfPoint(vp.x, vp.y)
+      ensurePageArray(pageNum.value)
+      const id = genId()
+      const defaultW = Math.min(200, img.naturalWidth)
+      const defaultH = Math.round(defaultW * (img.naturalHeight / img.naturalWidth))
+      annotations.value[pageNum.value].push({
+        id,
+        page: pageNum.value,
+        type: 'image',
+        x: pdfPt[0],
+        y: pdfPt[1],
+        w: defaultW,
+        h: defaultH,
+        src,
+        rotationDeg: 0,
+      })
+      selectedAnnoId.value = id
+      toolMode.value = 'select'
+      renderPage()
+      scheduleAutoSave()
     }
     img.src = src
   }
-  reader.readAsDataURL(file)
+  reader.readAsArrayBuffer(file)
   input.value = ''
 }
 
@@ -556,6 +612,7 @@ onMounted(() => {
       fitPage()
     }
   }, { immediate: false })
+  window.addEventListener('keydown', onKeyDownGlobal)
 })
 
 // ===== In-page highlight helpers =====
@@ -750,9 +807,80 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       img.style.top = `${r.y}px`
       img.style.width = `${r.w}px`
       img.style.height = `${r.h}px`
+      const rot = a.rotationDeg || 0
+      if (rot) img.style.transform = `rotate(${rot}deg)`
       img.draggable = false
       img.className = 'anno image'
       img.dataset.id = a.id
+      // selection outline + handles
+      if (selectedAnnoId.value === a.id) {
+        const box = document.createElement('div')
+        box.style.position = 'absolute'
+        box.style.left = `${r.x}px`
+        box.style.top = `${r.y}px`
+        box.style.width = `${r.w}px`
+        box.style.height = `${r.h}px`
+        box.style.border = '1px dashed #3b82f6'
+        box.style.pointerEvents = 'none'
+        box.className = 'sel-box'
+        box.dataset.id = a.id
+        overlay.appendChild(box)
+        ;['n','s','e','w','se'].forEach((pos) => {
+          const handle = document.createElement('div')
+          handle.className = `resize-h ${pos}`
+          handle.style.position = 'absolute'
+          const size = pos==='n'||pos==='s'||pos==='e'||pos==='w' ? 8 : 10
+          handle.style.width = `${size}px`
+          handle.style.height = `${size}px`
+          handle.style.background = '#3b82f6'
+          handle.style.borderRadius = '2px'
+          handle.style.pointerEvents = 'auto'
+          if (pos==='se'){ handle.style.left = `${r.x + r.w - 5}px`; handle.style.top = `${r.y + r.h - 5}px`; handle.style.cursor = 'nwse-resize' }
+          if (pos==='n'){ handle.style.left = `${r.x + r.w/2 - 4}px`; handle.style.top = `${r.y - 4}px`; handle.style.cursor = 'ns-resize' }
+          if (pos==='s'){ handle.style.left = `${r.x + r.w/2 - 4}px`; handle.style.top = `${r.y + r.h - 4}px`; handle.style.cursor = 'ns-resize' }
+          if (pos==='e'){ handle.style.left = `${r.x + r.w - 4}px`; handle.style.top = `${r.y + r.h/2 - 4}px`; handle.style.cursor = 'ew-resize' }
+          if (pos==='w'){ handle.style.left = `${r.x - 4}px`; handle.style.top = `${r.y + r.h/2 - 4}px`; handle.style.cursor = 'ew-resize' }
+          handle.style.zIndex = '15'
+          handle.dataset.id = a.id
+          handle.addEventListener('mousedown', (ev) => {
+            ev.stopPropagation()
+            selectedAnnoId.value = a.id
+            resizingHandle = pos as any
+            resizingStartRect = { x: a.x, y: a.y, w: a.w, h: a.h }
+            // 记录开始时 overlay 坐标与把手起点（用于与鼠标位移一比一）
+            const ovEl = document.getElementById('anno-overlay') as HTMLDivElement | null
+            const ob = ovEl?.getBoundingClientRect()
+            const startHx = ob ? ev.clientX - ob.left : (r.x + r.w)
+            const startHy = ob ? ev.clientY - ob.top : (r.y + r.h)
+            resizingStartOverlay = { x: r.x, y: r.y, w: r.w, h: r.h, hx: startHx, hy: startHy }
+          })
+          overlay.appendChild(handle)
+        })
+        // delete button (右上角)
+        const del = document.createElement('div')
+        del.style.position = 'absolute'
+        del.style.left = `${r.x + r.w - 12}px`
+        del.style.top = `${r.y - 12}px`
+        del.style.width = '20px'
+        del.style.height = '20px'
+        del.style.background = 'rgba(239,68,68,0.9)'
+        del.style.color = '#fff'
+        del.style.borderRadius = '50%'
+        del.style.display = 'grid'
+        del.style.placeItems = 'center'
+        del.style.cursor = 'pointer'
+        del.style.zIndex = '20'
+        del.textContent = '×'
+        del.className = 'del-btn'
+        del.dataset.id = a.id
+        del.addEventListener('mousedown', (ev) => {
+          ev.stopPropagation()
+          const list = annotations.value[pageNum.value] || []
+          const idx = list.findIndex(i => i.id === a.id)
+          if (idx >= 0) { snapshot(); list.splice(idx,1); selectedAnnoId.value=null; renderAnnotationsForCurrentPage(null as any); scheduleAutoSave() }
+        })
+        overlay.appendChild(del)
+      }
       overlay.appendChild(img)
       continue
     }
@@ -819,11 +947,18 @@ function onAnnoMouseDown(ev: MouseEvent) {
   if (toolMode.value === 'select') {
     if (target.classList.contains('anno')) {
       draggingAnnoId = target.dataset.id || null
+      selectedAnnoId.value = draggingAnnoId
+      resizingHandle = null
+      rotating = false
       if (draggingAnnoId) {
         draggingStartPdf = pdf
         const a = (annotations.value[pageNum.value] || []).find(i => i.id === draggingAnnoId)!
         draggingOriginPdf = { x: a.x, y: a.y }
       }
+    }
+    // 点击空白处取消选中
+    if (!target.classList.contains('anno')) {
+      selectedAnnoId.value = null
     }
     return
   }
@@ -930,6 +1065,133 @@ function onAnnoMouseMove(ev: MouseEvent) {
     }
     return
   }
+  // resizing image
+  if (resizingHandle && resizingStartOverlay && resizingStartRect) {
+    const list = annotations.value[pageNum.value] || []
+    const a = list.find(i => i.id === selectedAnnoId.value)
+    if (a && a.type === 'image') {
+      // 使用 overlay 坐标系进行计算，避免 Y 轴方向混淆
+      const overlay = ev.currentTarget as HTMLElement
+      const bounds = overlay.getBoundingClientRect()
+      const curX = ev.clientX - bounds.left
+      const curY = ev.clientY - bounds.top
+      const dxPx = curX - resizingStartOverlay.hx
+      const dyPx = curY - resizingStartOverlay.hy
+      const m = getOverlayMetrics()
+      if (!m) return
+      // 起始矩形（overlay 坐标）
+      const r0 = pdfRectToViewportRect(resizingStartRect)
+      let left = r0.x
+      let top = r0.y
+      let width = r0.w
+      let height = r0.h
+      if (resizingHandle === 'se') {
+        width = Math.max(10, r0.w + dxPx)
+        height = Math.max(10, r0.h + dyPx)
+      } else if (resizingHandle === 'e') {
+        width = Math.max(10, r0.w + dxPx)
+      } else if (resizingHandle === 's') {
+        height = Math.max(10, r0.h + dyPx)
+      } else if (resizingHandle === 'n') {
+        const newTop = r0.y + dyPx
+        const newHeight = Math.max(10, r0.h - dyPx)
+        top = newTop
+        height = newHeight
+      } else if (resizingHandle === 'w') {
+        const newLeft = r0.x + dxPx
+        const newWidth = Math.max(10, r0.w - dxPx)
+        left = newLeft
+        width = newWidth
+      }
+      const right = left + width
+      const bottom = top + height
+      // overlay -> viewport
+      const vLeft = left / m.sx
+      const vTop = top / m.sy
+      const vRight = right / m.sx
+      const vBottom = bottom / m.sy
+      // viewport -> pdf
+      const p1 = lastViewport.value.convertToPdfPoint(vLeft, vTop)
+      const p2 = lastViewport.value.convertToPdfPoint(vRight, vBottom)
+      const px1 = p1[0], py1 = p1[1]
+      const px2 = p2[0], py2 = p2[1]
+      a.x = Math.min(px1, px2)
+      a.y = Math.min(py1, py2)
+      a.w = Math.max(10, Math.abs(px2 - px1))
+      a.h = Math.max(10, Math.abs(py2 - py1))
+      // 局部更新：仅更新选中图片与辅助 UI，避免整层闪烁
+      const ov = document.getElementById('anno-overlay') as HTMLDivElement | null
+      if (ov) {
+        const imgEl = Array.from(ov.querySelectorAll('img.anno.image')).find(el => (el as HTMLElement).dataset.id === a.id)
+        if (imgEl) {
+          const rUpd = pdfRectToViewportRect(a)
+          ;(imgEl as HTMLElement).style.left = `${rUpd.x}px`
+          ;(imgEl as HTMLElement).style.top = `${rUpd.y}px`
+          ;(imgEl as HTMLElement).style.width = `${rUpd.w}px`
+          ;(imgEl as HTMLElement).style.height = `${rUpd.h}px`
+        } else {
+          renderAnnotationsForCurrentPage(null as any)
+        }
+        const box = ov.querySelector('div.sel-box') as HTMLDivElement | null
+        if (box) {
+          const rUpd = pdfRectToViewportRect(a)
+          box.style.left = `${rUpd.x}px`
+          box.style.top = `${rUpd.y}px`
+          box.style.width = `${rUpd.w}px`
+          box.style.height = `${rUpd.h}px`
+        }
+        const rUpdAll = pdfRectToViewportRect(a)
+        const handles = Array.from(ov.querySelectorAll('div.resize-h')).filter(el => (el as HTMLElement).dataset.id === a.id) as HTMLDivElement[]
+        if (handles.length) {
+          handles.forEach((h) => {
+            if (h.classList.contains('se')) {
+              h.style.left = `${rUpdAll.x + rUpdAll.w - 5}px`
+              h.style.top = `${rUpdAll.y + rUpdAll.h - 5}px`
+            } else if (h.classList.contains('n')) {
+              h.style.left = `${rUpdAll.x + rUpdAll.w/2 - 4}px`
+              h.style.top = `${rUpdAll.y - 4}px`
+            } else if (h.classList.contains('s')) {
+              h.style.left = `${rUpdAll.x + rUpdAll.w/2 - 4}px`
+              h.style.top = `${rUpdAll.y + rUpdAll.h - 4}px`
+            } else if (h.classList.contains('e')) {
+              h.style.left = `${rUpdAll.x + rUpdAll.w - 4}px`
+              h.style.top = `${rUpdAll.y + rUpdAll.h/2 - 4}px`
+            } else if (h.classList.contains('w')) {
+              h.style.left = `${rUpdAll.x - 4}px`
+              h.style.top = `${rUpdAll.y + rUpdAll.h/2 - 4}px`
+            }
+          })
+        }
+        const delBtn = ov.querySelector('div.del-btn') as HTMLDivElement | null
+        if (delBtn) {
+          const rUpd = pdfRectToViewportRect(a)
+          delBtn.style.left = `${rUpd.x + rUpd.w - 12}px`
+          delBtn.style.top = `${rUpd.y - 12}px`
+        }
+      } else {
+        renderAnnotationsForCurrentPage(null as any)
+      }
+    }
+    return
+  }
+  // rotating image
+  if (rotating && rotateCenterOverlay) {
+    const overlay = ev.currentTarget as HTMLElement
+    const bounds = overlay.getBoundingClientRect()
+    const cx = rotateCenterOverlay.x + bounds.left
+    const cy = rotateCenterOverlay.y + bounds.top
+    const dx = ev.clientX - cx
+    const dy = ev.clientY - cy
+    const ang = Math.atan2(dy, dx) - rotateStartAngle
+    const deg = Math.round((ang * 180 / Math.PI))
+    const list = annotations.value[pageNum.value] || []
+    const a = list.find(i => i.id === selectedAnnoId.value)
+    if (a && a.type === 'image') {
+      a.rotationDeg = deg
+      renderAnnotationsForCurrentPage(null as any)
+    }
+    return
+  }
   if (!isDrawing.value || !drawingStartPdf) return
   // draw preview by updating a temp element
   const temp = document.getElementById('anno-preview') as HTMLDivElement | null
@@ -963,6 +1225,21 @@ function onAnnoMouseUp(ev: MouseEvent) {
     draggingStartPdf = null
     draggingOriginPdf = null
     snapshot()
+    return
+  }
+  if (resizingHandle) {
+    resizingHandle = null
+    resizingStartRect = null
+    resizingStartOverlay = null
+    snapshot()
+    scheduleAutoSave()
+    return
+  }
+  if (rotating) {
+    rotating = false
+    rotateCenterOverlay = null
+    snapshot()
+    scheduleAutoSave()
     return
   }
   if (!isDrawing.value || !drawingStartPdf) return
@@ -1131,6 +1408,23 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
   el.style.height = '1px'
   const line = el.scrollHeight
   el.style.height = `${line}px`
+}
+
+function onKeyDownGlobal(e: KeyboardEvent) {
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    const id = selectedAnnoId.value
+    if (!id) return
+    const list = annotations.value[pageNum.value] || []
+    const idx = list.findIndex(i => i.id === id)
+    if (idx >= 0) {
+      e.preventDefault()
+      snapshot()
+      list.splice(idx, 1)
+      selectedAnnoId.value = null
+      renderAnnotationsForCurrentPage(null as any)
+      scheduleAutoSave()
+    }
+  }
 }
 </script>
 
