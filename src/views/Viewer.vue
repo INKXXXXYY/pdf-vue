@@ -38,7 +38,7 @@ function onChangePage(e: Event) {
 }
 
 // === Annotations (文本/高亮矩形/矩形) ===
-type AnnotationType = 'text' | 'highlight' | 'rect'
+type AnnotationType = 'text' | 'highlight' | 'rect' | 'image'
 type Annotation = {
   id: string
   page: number
@@ -50,6 +50,7 @@ type Annotation = {
   text?: string
   color?: string
   fontSize?: number
+  src?: string // for image
   // 视口锚点（用于首次渲染保障与点击点像素级一致）
   vx?: number
   vy?: number
@@ -58,7 +59,7 @@ type Annotation = {
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'select' | 'text' | 'highlight' | 'rect'
+type ToolMode = 'select' | 'text' | 'highlight' | 'rect' | 'image'
 const toolMode = ref<ToolMode>('select')
 const strokeColor = ref('#facc15')
 const textColor = ref('#111827')
@@ -71,6 +72,8 @@ let draggingOriginPdf: { x: number; y: number } | null = null
 const lastViewport: any = ref(null)
 // keep original PDF bytes for export
 let originalPdfBytes: ArrayBuffer | null = null
+// pending image to place
+const pendingImage = ref<{ src: string; naturalWidth: number; naturalHeight: number } | null>(null)
 // persistence helpers
 const autoSaveEnabled = ref(true)
 let saveTimer: any = null
@@ -455,6 +458,12 @@ async function exportPdf() {
         const color = a.color || '#f59e0b'
         const c = hexToRgb(color)
         target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(c.r, c.g, c.b), borderWidth: 2, borderOpacity: 1, color: undefined })
+      } else if (a.type === 'image' && a.src) {
+        try {
+          const pngBytes = dataUrlToBytes(a.src)
+          const png = await newPdf.embedPng(pngBytes).catch(async () => await newPdf.embedJpg(pngBytes))
+          target.drawImage(png, { x: a.x, y: a.y, width: a.w, height: a.h })
+        } catch {}
       }
     }
   }
@@ -469,6 +478,37 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const g = (bigint >> 8) & 255
   const b = bigint & 255
   return { r: r / 255, g: g / 255, b: b / 255 }
+}
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const parts = dataUrl.split(',')
+  const base64 = parts[1] || ''
+  const binary = atob(base64)
+  const len = binary.length
+  const bytes = new Uint8Array(len)
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function triggerPickImage() {
+  const el = document.getElementById('img-file') as HTMLInputElement | null
+  if (el) el.click()
+}
+function onPickImageFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    const src = String(reader.result || '')
+    const img = new Image()
+    img.onload = () => {
+      pendingImage.value = { src, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight }
+      toolMode.value = 'image'
+    }
+    img.src = src
+  }
+  reader.readAsDataURL(file)
+  input.value = ''
 }
 
 async function exportPdfServer() {
@@ -701,6 +741,21 @@ async function renderAnnotationsForCurrentPage(_page: any) {
     div.className = `anno ${a.type}`
     div.dataset.id = a.id
     div.style.position = 'absolute'
+      if (a.type === 'image') {
+      const r = pdfRectToViewportRect(a)
+      const img = document.createElement('img')
+      img.src = a.src || ''
+      img.style.position = 'absolute'
+      img.style.left = `${r.x}px`
+      img.style.top = `${r.y}px`
+      img.style.width = `${r.w}px`
+      img.style.height = `${r.h}px`
+      img.draggable = false
+      img.className = 'anno image'
+      img.dataset.id = a.id
+      overlay.appendChild(img)
+      continue
+    }
       if (a.type !== 'text') {
       const r = pdfRectToViewportRect(a)
       div.style.left = `${r.x}px`
@@ -800,6 +855,27 @@ function onAnnoMouseDown(ev: MouseEvent) {
     annotations.value[pageNum.value].push(anno)
     editingAnnoId.value = id
     renderPage().then(() => openTextEditor(id))
+    return
+  }
+  if (toolMode.value === 'image' && pendingImage.value) {
+    ensurePageArray(pageNum.value)
+    const id = genId()
+    const img = pendingImage.value
+    const defaultW = Math.min(200, img.naturalWidth)
+    const defaultH = Math.round(defaultW * (img.naturalHeight / img.naturalWidth))
+    const anno: Annotation = {
+      id,
+      page: pageNum.value,
+      type: 'image',
+      x: pdf.x,
+      y: pdf.y,
+      w: defaultW,
+      h: defaultH,
+      src: img.src,
+    }
+    annotations.value[pageNum.value].push(anno)
+    pendingImage.value = null
+    renderPage()
     return
   }
   // rect / highlight draw start
@@ -1096,6 +1172,9 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
       <button @click="clearAllEdits">重做</button>
       <div class="sep" />
       <button @click="exportPdf">导出PDF</button>
+      <div class="sep" />
+      <input id="img-file" type="file" accept="image/*" style="display:none" @change="onPickImageFile" />
+      <button @click="triggerPickImage">添加图片</button>
       <button @click="exportPdfServer">服务端导出</button>
       <button @click="saveAnnotationsJson">导出JSON</button>
       <button @click="triggerImportJson">导入JSON</button>
