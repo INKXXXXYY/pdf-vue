@@ -1,3 +1,19 @@
+2025-08-12 版本管理
+
+- 启用 Git：使用 winget 静默安装 Git（2.50.1），在 PowerShell 下使用调用运算符 `&` 执行 `C:\Program Files\Git\cmd\git.exe` 以避免 PATH 未刷新问题。
+- 初始化与打标签：
+  - `git init`
+  - `git add -A`
+  - `git -c user.name="pdf-dev" -c user.email="pdf-dev@example.com" commit -m "chore: baseline v0.1.0 ..."`
+  - `git tag v0.1.0`
+- CRLF/LF 提示：.gitattributes 设定 `* text=auto eol=lf`，首次提交出现 CRLF→LF 警告属正常，后续编辑器统一 LF 即可。
+- 回滚指引（原因+建议）：
+  - 回滚到标签但保留历史：`git checkout v0.1.0`（分离头指针，仅临时查看）→ 建议创建补丁分支：`git switch -c hotfix/from-v0.1.0`。
+  - 强制回退分支到标签：`git reset --hard v0.1.0`（理由：需彻底回到稳定基线；注意：本地未提交变更会丢失，且需与远端强推一致 `git push -f`）。
+  - 回退一个或多个提交但保留工作区：`git reset --soft HEAD^` 或 `git reset --mixed HEAD^^`（理由：保留改动以便重做提交）。
+  - 生成反向提交：`git revert <commit>`（理由：保留历史且可安全推送到共享仓库）。
+  - 推送标签与分支：`git push --tags`、`git push -u origin master`。
+
 2025-08-12 初始化记录
 
 - 目标：基于 Vue 3 + TypeScript + PDF.js + Stirling PDF 搭建在线 PDF 编辑器。
@@ -69,6 +85,22 @@
   - 缩略图性能：大页多文档会慢，当前串行生成，后续可懒加载或节流；
   - 搜索仅页级命中：未做文本坐标高亮；后续结合 `textContent` 字项位置信息可实现；
   - 高亮坐标：PDF.js 文本项的 `transform` 与 `viewport.transform` 需矩阵相乘得到画布空间；不同 PDF 字体度量下 `width/height` 不稳定，已做保守 fallback；旋转时需用 `rotation` 参与 `viewport`。
+
+2025-08-12 注释与编辑层（第 3 阶段起步）
+
+- 已实现：
+  - 注释覆盖层 `#anno-overlay`：支持工具模式（选择/文本/高亮矩形/矩形）；
+  - 文本：点击弹窗输入文本，按 PDF 坐标存储，渲染时按当前 scale 转换字号；
+  - 高亮矩形/矩形：拖拽绘制，颜色可配置；
+  - 选择移动：选择模式下可拖动注释，自动重绘；
+  - 撤销/重做：基于注释 JSON 快照；
+  - 坐标转换：使用 `viewport.convertToPdfPoint`、`convertToViewportRectangle` 做 PDF ↔ 画布坐标转换，支持旋转缩放。
+- 待优化/坑：
+  - 文本可编辑、双击进入编辑态；
+  - 注释尺寸缩放与旋转；
+  - 键盘对齐/吸附、网格；
+  - 本地持久化（localStorage）与跨页联动；
+  - 导出时的扁平化（结合 `pdf-lib`）与字体嵌入。
   - 旋转与适配：旋转后需重新计算视口尺寸再求 scale；
   - 书签目的地：有的条目无 `dest`，需判空；
   - 事件抖动：频繁渲染可加 loading/节流，当前先保守处理。

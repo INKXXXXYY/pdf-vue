@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { getDocument, GlobalWorkerOptions, PDFDocumentProxy } from 'pdfjs-dist'
+import { onMounted, ref, watch, computed, nextTick } from 'vue'
+import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
 // @ts-ignore - vite can bundle this entry as worker
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker?worker&url'
 
@@ -33,6 +34,92 @@ const flatMatches = ref<Array<{ page: number; rectIndex: number }>>([])
 function onChangePage(e: Event) {
   const input = e.target as HTMLInputElement
   jumpTo(input.value)
+}
+
+// === Annotations (文本/高亮矩形/矩形) ===
+type AnnotationType = 'text' | 'highlight' | 'rect'
+type Annotation = {
+  id: string
+  page: number
+  type: AnnotationType
+  x: number // PDF 坐标（以 PDF 点为单位，rotation=0 的坐标系）
+  y: number
+  w: number
+  h: number
+  text?: string
+  color?: string
+  fontSize?: number
+  // 视口锚点（用于首次渲染保障与点击点像素级一致）
+  vx?: number
+  vy?: number
+  _scale?: number
+  _rotation?: number
+}
+const annotations = ref<Record<number, Annotation[]>>({})
+const editingAnnoId = ref<string | null>(null)
+type ToolMode = 'select' | 'text' | 'highlight' | 'rect'
+const toolMode = ref<ToolMode>('select')
+const strokeColor = ref('#facc15')
+const textColor = ref('#111827')
+const textFontSize = ref(14)
+const isDrawing = ref(false)
+let drawingStartPdf: { x: number; y: number } | null = null
+let draggingAnnoId: string | null = null
+let draggingStartPdf: { x: number; y: number } | null = null
+let draggingOriginPdf: { x: number; y: number } | null = null
+const lastViewport: any = ref(null)
+// 编辑模式下强制整页适配并锁定缩放/旋转
+const isEditingMode = computed(() => toolMode.value !== 'select')
+// const lockFitPage = ref(false)
+let lastMoveLogTs = 0
+ let lastOverlayPoint: { x: number; y: number } | null = null
+ let lastViewportPoint: { x: number; y: number } | null = null
+ let lastPdfPoint: { x: number; y: number } | null = null
+function getOverlayMetrics() {
+  const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
+  const canvas = canvasRef.value
+  if (!overlay || !canvas || !lastViewport.value) return null
+  const rect = overlay.getBoundingClientRect()
+  const vw = lastViewport.value.width
+  const vh = lastViewport.value.height
+  const sx = rect.width > 0 ? rect.width / vw : 1
+  const sy = rect.height > 0 ? rect.height / vh : 1
+  return { overlay, rect, sx, sy, vw, vh }
+}
+
+function viewportPointToOverlayPoint(vx: number, vy: number): { x: number; y: number } {
+  const m = getOverlayMetrics()
+  if (!m) return { x: vx, y: vy }
+  return { x: vx * m.sx, y: vy * m.sy }
+}
+
+function overlayPointToViewportPoint(ox: number, oy: number): { x: number; y: number } {
+  const m = getOverlayMetrics()
+  if (!m) return { x: ox, y: oy }
+  return { x: ox / m.sx, y: oy / m.sy }
+}
+// 撤销/重做
+const undoStack = ref<string[]>([])
+const redoStack = ref<string[]>([])
+function snapshot() {
+  undoStack.value.push(JSON.stringify(annotations.value))
+  redoStack.value = []
+}
+function undo() {
+  const prev = undoStack.value.pop()
+  if (!prev) return
+  const cur = JSON.stringify(annotations.value)
+  redoStack.value.push(cur)
+  annotations.value = JSON.parse(prev)
+  renderPage()
+}
+function redo() {
+  const next = redoStack.value.pop()
+  if (!next) return
+  const cur = JSON.stringify(annotations.value)
+  undoStack.value.push(cur)
+  annotations.value = JSON.parse(next)
+  renderPage()
 }
 
 async function loadPdf(urlOrData: string | ArrayBuffer) {
@@ -83,15 +170,35 @@ async function renderPage() {
   const ctx = canvas.getContext('2d')!
   canvas.width = Math.ceil(viewport.width)
   canvas.height = Math.ceil(viewport.height)
-  await page.render({ canvasContext: ctx, viewport }).promise
+  await page.render({ canvasContext: ctx, viewport, canvas }).promise
+  lastViewport.value = viewport
+  // sync overlays to the actual rendered canvas size on screen
+  const rect = canvas.getBoundingClientRect()
+  const hl = document.getElementById('hl-overlay') as HTMLDivElement | null
+  const anno = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (hl) {
+    hl.style.width = `${rect.width}px`
+    hl.style.height = `${rect.height}px`
+    hl.style.left = `0px`
+    hl.style.top = `0px`
+  }
+  if (anno) {
+    anno.style.width = `${rect.width}px`
+    anno.style.height = `${rect.height}px`
+    anno.style.left = `0px`
+    anno.style.top = `0px`
+  }
   await renderHighlightsForCurrentPage(page)
+  await renderAnnotationsForCurrentPage(page)
 }
 
 function zoomIn() {
+  if (isEditingMode.value) return
   scale.value = Math.min(scale.value + 0.25, 4)
   renderPage()
 }
 function zoomOut() {
+  if (isEditingMode.value) return
   scale.value = Math.max(scale.value - 0.25, 0.25)
   renderPage()
 }
@@ -117,10 +224,12 @@ function fitPage() {
   })
 }
 function rotateClockwise() {
+  if (isEditingMode.value) return
   rotation.value = (rotation.value + 90) % 360
   renderPage()
 }
 function rotateCounterClockwise() {
+  if (isEditingMode.value) return
   rotation.value = (rotation.value + 270) % 360
   renderPage()
 }
@@ -157,7 +266,7 @@ async function renderThumbnails() {
     const ctx = canvas.getContext('2d')!
     canvas.width = Math.ceil(viewport.width)
     canvas.height = Math.ceil(viewport.height)
-    await page.render({ canvasContext: ctx, viewport }).promise
+    await page.render({ canvasContext: ctx, viewport, canvas }).promise
     results.push({ page: p, dataUrl: canvas.toDataURL('image/png') })
   }
   thumbnails.value = results
@@ -200,7 +309,7 @@ async function runSearch() {
   const lower = q.toLowerCase()
   for (let p = 1; p <= pdfDoc.numPages; p++) {
     const page = await pdfDoc.getPage(p)
-    const textContent = await page.getTextContent({ normalizeWhitespace: true })
+    const textContent = await page.getTextContent()
     const items = textContent.items as any[]
     let count = 0
     for (const it of items) {
@@ -246,6 +355,13 @@ function prevMatch() {
 
 onMounted(() => {
   // 不默认加载占位文件；请通过上传或后续提供 URL 加载
+  // 初次进入或每次进入编辑模式时，保持整页适配，降低缩放差异带来的定位误差
+  watch(isEditingMode, async (v) => {
+    if (v) {
+      await nextTick()
+      fitPage()
+    }
+  }, { immediate: false })
 })
 
 // ===== In-page highlight helpers =====
@@ -284,9 +400,13 @@ function rectFromTransform(transform: number[], width: number, height: number) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
+function round3(n: number) {
+  return Math.round(n * 1000) / 1000
+}
+
 async function getRectsForPage(page: any, queryLower: string) {
   const rects: Array<{ x: number; y: number; w: number; h: number }> = []
-  const textContent = await page.getTextContent({ normalizeWhitespace: true })
+    const textContent = await page.getTextContent()
   const items = textContent.items as any[]
   const viewport = page.getViewport({ scale: scale.value, rotation: rotation.value })
   const vp = (viewport as any).transform as number[]
@@ -305,8 +425,9 @@ async function getRectsForPage(page: any, queryLower: string) {
 async function renderHighlightsForCurrentPage(page: any) {
   const overlay = document.getElementById('hl-overlay') as HTMLDivElement | null
   if (!overlay || !canvasRef.value) return
-  overlay.style.width = `${canvasRef.value.width}px`
-  overlay.style.height = `${canvasRef.value.height}px`
+  const rect = canvasRef.value.getBoundingClientRect()
+  overlay.style.width = `${rect.width}px`
+  overlay.style.height = `${rect.height}px`
   overlay.innerHTML = ''
   const q = searchQuery.value.trim().toLowerCase()
   if (!q) return
@@ -342,6 +463,376 @@ function scrollToCurrentMatch() {
   const dy = rect.top - host.top + rect.height / 2 - stage.clientHeight / 2
   stage.scrollBy({ left: dx, top: dy, behavior: 'smooth' })
 }
+
+// ===== Annotation helpers =====
+function genId() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36)
+}
+function ensurePageArray(p: number) {
+  if (!annotations.value[p]) annotations.value[p] = []
+}
+function viewportToPdf(xOverlay: number, yOverlay: number): { x: number; y: number } {
+  if (!lastViewport.value) return { x: xOverlay, y: yOverlay }
+  const m = getOverlayMetrics()
+  if (!m) return { x: xOverlay, y: yOverlay }
+  const vx = xOverlay / m.sx
+  const vy = yOverlay / m.sy
+  const pdf = lastViewport.value.convertToPdfPoint(vx, vy)
+  return { x: pdf[0], y: pdf[1] }
+}
+function pdfRectToViewportRect(pdfRect: { x: number; y: number; w: number; h: number }) {
+  if (!lastViewport.value) return pdfRect
+  const m = getOverlayMetrics()
+  const r = [pdfRect.x, pdfRect.y, pdfRect.x + pdfRect.w, pdfRect.y + pdfRect.h]
+  const out = lastViewport.value.convertToViewportRectangle(r)
+  const xV = Math.min(out[0], out[2])
+  const yV = Math.min(out[1], out[3])
+  const wV = Math.abs(out[2] - out[0])
+  const hV = Math.abs(out[3] - out[1])
+  if (!m) return { x: xV, y: yV, w: wV, h: hV }
+  return { x: xV * m.sx, y: yV * m.sy, w: wV * m.sx, h: hV * m.sy }
+}
+async function renderAnnotationsForCurrentPage(_page: any) {
+  const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (!overlay || !canvasRef.value) return
+  overlay.style.width = `${canvasRef.value.width}px`
+  overlay.style.height = `${canvasRef.value.height}px`
+  overlay.innerHTML = ''
+  const list = annotations.value[pageNum.value] || []
+  for (const a of list) {
+    const div = document.createElement('div')
+    div.className = `anno ${a.type}`
+    div.dataset.id = a.id
+    div.style.position = 'absolute'
+    if (a.type !== 'text') {
+      const r = pdfRectToViewportRect(a)
+      div.style.left = `${r.x}px`
+      div.style.top = `${r.y}px`
+      div.style.width = `${r.w}px`
+      div.style.height = `${r.h}px`
+      if (a.type === 'highlight') {
+        div.style.background = a.color || 'rgba(250, 204, 21, 0.35)'
+        div.style.outline = '1px solid rgba(234,179,8,0.6)'
+      } else if (a.type === 'rect') {
+        div.style.border = `2px solid ${a.color || '#f59e0b'}`
+        div.style.background = 'transparent'
+      }
+    } else {
+      // text: first render after creation uses stored viewport anchor to avoid timing drift
+      let vx: number, vy: number
+      const fontPx = (a.fontSize || 14) * (scale.value)
+      if (typeof a.vx === 'number' && typeof a.vy === 'number' && a._scale === scale.value && a._rotation === rotation.value) {
+        vx = a.vx
+        vy = a.vy
+      } else {
+        const vpt = lastViewport.value?.convertToViewportPoint(a.x, a.y) || [a.x, a.y]
+        const ov = viewportPointToOverlayPoint(vpt[0], vpt[1])
+        vx = ov.x
+        vy = ov.y
+        a.vx = vx
+        a.vy = vy
+        a._scale = scale.value
+        a._rotation = rotation.value
+      }
+      const leftPx = round3(vx)
+      const topPx = round3(vy)
+      div.style.left = `${leftPx}px`
+      div.style.top = `${topPx}px`
+      div.style.color = a.color || '#111827'
+      div.style.fontSize = `${fontPx}px`
+      div.textContent = a.text || ''
+      // debug logs removed
+      div.addEventListener('dblclick', (e) => {
+        e.stopPropagation()
+        startEditAnnotation(a.id)
+      })
+    }
+    overlay.appendChild(div)
+  }
+}
+function onAnnoMouseDown(ev: MouseEvent) {
+  if (!lastViewport.value) return
+  const target = ev.target as HTMLElement
+  const overlay = ev.currentTarget as HTMLElement
+  const bounds = overlay.getBoundingClientRect()
+  const canvasRect = canvasRef.value?.getBoundingClientRect()
+  const baseLeft = canvasRect ? canvasRect.left : bounds.left
+  const baseTop = canvasRect ? canvasRect.top : bounds.top
+  const x = ev.clientX - baseLeft
+  const y = ev.clientY - baseTop
+  const pdf = viewportToPdf(x, y)
+  if (toolMode.value === 'select') {
+    if (target.classList.contains('anno')) {
+      draggingAnnoId = target.dataset.id || null
+      if (draggingAnnoId) {
+        draggingStartPdf = pdf
+        const a = (annotations.value[pageNum.value] || []).find(i => i.id === draggingAnnoId)!
+        draggingOriginPdf = { x: a.x, y: a.y }
+      }
+    }
+    return
+  }
+  if (toolMode.value === 'text') {
+    ensurePageArray(pageNum.value)
+    const id = genId()
+    // 使用最近一次 mousemove 记录的坐标，避免 click 事件坐标抖动
+    const useOverlay = lastOverlayPoint || { x, y }
+    const useViewport = lastViewportPoint || overlayPointToViewportPoint(useOverlay.x, useOverlay.y)
+    const pdfFromCache = lastPdfPoint
+    const pdfPt = pdfFromCache ? [pdfFromCache.x, pdfFromCache.y] : lastViewport.value.convertToPdfPoint(useViewport.x, useViewport.y)
+    const anno: Annotation = {
+      id,
+      page: pageNum.value,
+      type: 'text',
+      x: pdfPt[0],
+      y: pdfPt[1],
+      w: 0,
+      h: 0,
+      text: '',
+      color: textColor.value,
+      fontSize: textFontSize.value,
+      vx: useOverlay.x,
+      vy: useOverlay.y,
+      _scale: scale.value,
+      _rotation: rotation.value,
+    }
+    // debug log removed: [text:add]
+    annotations.value[pageNum.value].push(anno)
+    editingAnnoId.value = id
+    renderPage().then(() => openTextEditor(id))
+    return
+  }
+  // rect / highlight draw start
+  isDrawing.value = true
+  drawingStartPdf = pdf
+}
+function onAnnoMouseMove(ev: MouseEvent) {
+  if (!lastViewport.value) return
+  const overlay = ev.currentTarget as HTMLElement
+  const bounds = overlay.getBoundingClientRect()
+  const canvasRect = canvasRef.value?.getBoundingClientRect()
+  const baseLeft = canvasRect ? canvasRect.left : bounds.left
+  const baseTop = canvasRect ? canvasRect.top : bounds.top
+  const x = ev.clientX - baseLeft
+  const y = ev.clientY - baseTop
+  const pdf = viewportToPdf(x, y)
+  // 调试：鼠标移动时输出 overlay / viewport / pdf 坐标（节流 100ms）
+  const now = performance.now()
+  if (now - lastMoveLogTs > 100) {
+    const vp = overlayPointToViewportPoint(x, y)
+    const pdfPt = lastViewport.value.convertToPdfPoint(vp.x, vp.y)
+    if (toolMode.value === 'text') {
+      // debug log removed: [text:move]
+      lastMoveLogTs = now
+    }
+    ;(lastPdfPoint as any) = { x: pdfPt[0], y: pdfPt[1] }
+  }
+  // 缓存最近一次移动位置（overlay/viewport 坐标），点击时直接使用，避免 click 抖动
+  const vpCache = overlayPointToViewportPoint(x, y)
+  ;(lastOverlayPoint as any) = { x, y }
+  ;(lastViewportPoint as any) = { x: vpCache.x, y: vpCache.y }
+  if (lastViewport.value) {
+    const pdfFromCache = lastViewport.value.convertToPdfPoint(vpCache.x, vpCache.y)
+    ;(lastPdfPoint as any) = { x: pdfFromCache[0], y: pdfFromCache[1] }
+  }
+  if (draggingAnnoId && draggingStartPdf && draggingOriginPdf) {
+    const dx = pdf.x - draggingStartPdf.x
+    const dy = pdf.y - draggingStartPdf.y
+    const list = annotations.value[pageNum.value] || []
+    const a = list.find(i => i.id === draggingAnnoId)
+    if (a) {
+      a.x = (draggingOriginPdf.x + dx)
+      a.y = (draggingOriginPdf.y + dy)
+      renderPage()
+    }
+    return
+  }
+  if (!isDrawing.value || !drawingStartPdf) return
+  // draw preview by updating a temp element
+  const temp = document.getElementById('anno-preview') as HTMLDivElement | null
+  const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (!overlayDiv) return
+  const startV = lastViewport.value.convertToViewportPoint(drawingStartPdf.x, drawingStartPdf.y)
+  const curV = [x, y]
+  const rx = Math.min(startV[0], curV[0])
+  const ry = Math.min(startV[1], curV[1])
+  const rw = Math.abs(curV[0] - startV[0])
+  const rh = Math.abs(curV[1] - startV[1])
+  let el = temp
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'anno-preview'
+    el.className = 'anno preview'
+    el.style.position = 'absolute'
+    overlayDiv.appendChild(el)
+  }
+  el.style.left = `${rx}px`
+  el.style.top = `${ry}px`
+  el.style.width = `${rw}px`
+  el.style.height = `${rh}px`
+  el.style.border = '1px dashed #3b82f6'
+  el.style.background = toolMode.value === 'highlight' ? 'rgba(250, 204, 21, 0.25)' : 'transparent'
+}
+function onAnnoMouseUp(ev: MouseEvent) {
+  if (!lastViewport.value) return
+  if (draggingAnnoId) {
+    draggingAnnoId = null
+    draggingStartPdf = null
+    draggingOriginPdf = null
+    snapshot()
+    return
+  }
+  if (!isDrawing.value || !drawingStartPdf) return
+  isDrawing.value = false
+  const overlay = ev.currentTarget as HTMLElement
+  const bounds = overlay.getBoundingClientRect()
+  const canvasRect = canvasRef.value?.getBoundingClientRect()
+  const baseLeft = canvasRect ? canvasRect.left : bounds.left
+  const baseTop = canvasRect ? canvasRect.top : bounds.top
+  const x = ev.clientX - baseLeft
+  const y = ev.clientY - baseTop
+  const endPdf = viewportToPdf(x, y)
+  const x0 = Math.min(drawingStartPdf.x, endPdf.x)
+  const y0 = Math.min(drawingStartPdf.y, endPdf.y)
+  const w = Math.abs(endPdf.x - drawingStartPdf.x)
+  const h = Math.abs(endPdf.y - drawingStartPdf.y)
+  const type: AnnotationType = toolMode.value === 'highlight' ? 'highlight' : 'rect'
+  if (w < 1 || h < 1) return
+  ensurePageArray(pageNum.value)
+  snapshot()
+  annotations.value[pageNum.value].push({
+    id: genId(),
+    page: pageNum.value,
+    type,
+    x: x0,
+    y: y0,
+    w,
+    h,
+    color: strokeColor.value,
+  })
+  // remove preview
+  const temp = document.getElementById('anno-preview')
+  if (temp?.parentElement) temp.parentElement.removeChild(temp)
+  renderPage()
+}
+
+function startEditAnnotation(id: string) {
+  editingAnnoId.value = id
+  renderPage().then(() => openTextEditor(id))
+}
+
+function openTextEditor(id: string) {
+  const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (!overlay || !lastViewport.value) return
+  const list = annotations.value[pageNum.value] || []
+  const a = list.find(i => i.id === id)
+  if (!a) return
+      const [vx0, vy0] = lastViewport.value.convertToViewportPoint(a.x, a.y)
+      const ov = viewportPointToOverlayPoint(vx0, vy0)
+      // 以 overlay 的内容盒为定位上下文
+      const overlayRect = (document.getElementById('anno-overlay') as HTMLDivElement)?.getBoundingClientRect()
+      const canvasRect = canvasRef.value?.getBoundingClientRect()
+      if (overlayRect && canvasRect) {
+        // 若 overlay 未对齐画布，修正其相对定位偏差
+        const dx = round3(canvasRect.left - overlayRect.left)
+        const dy = round3(canvasRect.top - overlayRect.top)
+        ov.x = round3(ov.x + dx)
+        ov.y = round3(ov.y + dy)
+      }
+  const input = document.createElement('textarea')
+  input.id = 'anno-editor'
+  input.value = a.text || ''
+  input.style.position = 'absolute'
+  input.style.left = `${ov.x}px`
+  input.style.top = `${ov.y}px`
+  input.style.minWidth = '120px'
+  input.style.fontSize = `${(a.fontSize || 14) * (scale.value)}px`
+  input.style.lineHeight = '1.2'
+  input.style.padding = '0 4px'
+  input.style.border = '1px solid #3b82f6'
+  input.style.background = 'transparent'
+  input.style.resize = 'none'
+  input.style.overflow = 'hidden'
+  input.style.height = '1.4em'
+  input.style.minHeight = '0'
+  input.style.maxHeight = '1.4em'
+  input.style.zIndex = '10'
+  overlay.appendChild(input)
+  input.focus()
+  autoResizeTextarea(input)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      commitTextEditor()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      cancelTextEditor()
+    }
+  })
+  input.addEventListener('blur', () => {
+    // 避免与 keydown Enter 竞争导致重复提交/渲染过程中节点已被移除
+    setTimeout(() => commitTextEditor(), 0)
+  })
+  input.addEventListener('input', () => autoResizeTextarea(input))
+}
+
+function commitTextEditor() {
+  const input = document.getElementById('anno-editor') as HTMLTextAreaElement | null
+  if (!input || !input.parentElement) return
+  const list = annotations.value[pageNum.value] || []
+  const a = list.find(i => i.id === editingAnnoId.value)
+  const val = input.value.trim()
+  if (a) {
+    if (val) {
+      snapshot()
+      a.text = val
+      // 将当前输入框的 overlay 位置反算为 PDF 坐标，确保提交后位置与所见一致
+      const left = parseFloat(input.style.left || '0')
+      const top = parseFloat(input.style.top || '0')
+      if (Number.isFinite(left) && Number.isFinite(top) && lastViewport.value) {
+        const vp = overlayPointToViewportPoint(left, top)
+        const pdfPt = lastViewport.value.convertToPdfPoint(vp.x, vp.y)
+        a.x = pdfPt[0]
+        a.y = pdfPt[1]
+        a.vx = left
+        a.vy = top
+        a._scale = scale.value
+        a._rotation = rotation.value
+      }
+    } else {
+      // empty -> remove
+      snapshot()
+      const idx = list.findIndex(i => i.id === a.id)
+      if (idx >= 0) list.splice(idx, 1)
+    }
+  }
+  input.remove()
+  editingAnnoId.value = null
+  renderPage()
+}
+
+function cancelTextEditor() {
+  const input = document.getElementById('anno-editor') as HTMLTextAreaElement | null
+  if (input) input.remove()
+  // if it was a new empty annotation, remove it
+  const list = annotations.value[pageNum.value] || []
+  if (editingAnnoId.value) {
+    const a = list.find(i => i.id === editingAnnoId.value)
+    if (a && !a.text) {
+      const idx = list.findIndex(i => i.id === a.id)
+      if (idx >= 0) list.splice(idx, 1)
+    }
+  }
+  editingAnnoId.value = null
+  renderPage()
+}
+
+function autoResizeTextarea(el: HTMLTextAreaElement) {
+  // 单行自适应：先重置高度，再按滚动高度设置，同时限制为 1 行高
+  el.style.height = '1px'
+  const line = el.scrollHeight
+  el.style.height = `${line}px`
+}
 </script>
 
 <template>
@@ -354,19 +845,32 @@ function scrollToCurrentMatch() {
       <button @click="nextPage">下一页</button>
       <input style="width:80px" type="number" :max="numPages" :min="1" :value="pageNum" @change="onChangePage" />
       <div class="sep" />
-      <button @click="zoomOut">缩小</button>
-      <button @click="zoomIn">放大</button>
-      <button @click="fitWidth">适配宽度</button>
+      <button @click="zoomOut" :disabled="isEditingMode">缩小</button>
+      <button @click="zoomIn" :disabled="isEditingMode">放大</button>
+      <button @click="fitWidth" :disabled="isEditingMode">适配宽度</button>
       <button @click="fitPage">整页适配</button>
       <div class="sep" />
-      <button @click="rotateCounterClockwise">左旋转</button>
-      <button @click="rotateClockwise">右旋转</button>
+      <button @click="rotateCounterClockwise" :disabled="isEditingMode">左旋转</button>
+      <button @click="rotateClockwise" :disabled="isEditingMode">右旋转</button>
       <div class="sep" />
       <input placeholder="搜索文本" v-model="searchQuery" @keyup.enter="runSearch" />
       <button @click="runSearch">搜索</button>
       <button :disabled="!searchMatches.length" @click="prevMatch">上一个</button>
       <button :disabled="!searchMatches.length" @click="nextMatch">下一个</button>
       <span v-if="hasSearched">{{ searchMatches.length ? (currentMatchIndex+1) : 0 }}/{{ searchMatches.length }}</span>
+      <div class="sep" />
+      <label>工具:</label>
+      <select v-model="toolMode">
+        <option value="select">选择</option>
+        <option value="text">文本</option>
+        <option value="highlight">高亮矩形</option>
+        <option value="rect">矩形</option>
+      </select>
+      <input type="color" v-model="strokeColor" title="颜色" />
+      <label>字体:</label>
+      <input style="width:60px" type="number" v-model.number="textFontSize" min="8" max="72" />
+      <button @click="undo">撤销</button>
+      <button @click="redo">重做</button>
     </div>
     <div class="content">
       <aside class="sidebar">
@@ -398,6 +902,7 @@ function scrollToCurrentMatch() {
         <div class="canvas-wrap">
           <canvas ref="canvasRef"></canvas>
           <div id="hl-overlay" class="hl-overlay"></div>
+          <div id="anno-overlay" class="anno-overlay" @mousedown="onAnnoMouseDown" @mousemove="onAnnoMouseMove" @mouseup="onAnnoMouseUp"></div>
         </div>
       </div>
     </div>
@@ -422,9 +927,15 @@ function scrollToCurrentMatch() {
 .stage { flex: 1; overflow: auto; display: grid; place-items: center; background: #f6f7fb; padding: 12px; }
 canvas { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: block; }
 .canvas-wrap { position: relative; }
-.hl-overlay { position: absolute; inset: 0; pointer-events: none; }
+.hl-overlay { position: absolute; inset: 0; pointer-events: none; left: 0; top: 0; }
 .hl { position: absolute; background: rgba(250, 204, 21, 0.35); outline: 1px solid rgba(234, 179, 8, 0.6); }
 .hl.current { background: rgba(59, 130, 246, 0.35); outline-color: rgba(59, 130, 246, 0.7); }
+.anno-overlay { position: absolute; inset: 0; cursor: crosshair; left: 0; top: 0; }
+.anno { position: absolute; }
+.anno#anno-editor { position: absolute; }
+.anno.text { pointer-events: auto; user-select: none; background: transparent; }
+.anno.rect { background: transparent; }
+.anno.preview { pointer-events: none; }
 .error { color: #c62828; padding: 8px 12px; }
 </style>
 
