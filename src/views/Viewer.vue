@@ -470,6 +470,28 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const b = bigint & 255
   return { r: r / 255, g: g / 255, b: b / 255 }
 }
+
+async function exportPdfServer() {
+  if (!pdfDoc) return alert('请先加载 PDF 文件')
+  const form = new FormData()
+  const url = (pdfDoc as any).url as string | undefined
+  if (url) {
+    form.append('url', url)
+  } else if (originalPdfBytes) {
+    const blob = new Blob([originalPdfBytes], { type: 'application/pdf' })
+    form.append('file', blob, 'source.pdf')
+  } else {
+    return alert('缺少源 PDF 数据，无法服务端导出')
+  }
+  form.append('annotations', JSON.stringify(annotations.value))
+  const resp = await fetch('/api/annotate/flatten', { method: 'POST', body: form })
+  if (!resp.ok) {
+    const txt = await resp.text()
+    return alert('服务端导出失败: ' + txt)
+  }
+  const bytes = await resp.arrayBuffer()
+  saveBlob(new Blob([bytes], { type: 'application/pdf' }), 'exported-server.pdf')
+}
 function nextMatch() {
   if (flatMatches.value.length === 0) return
   currentMatchIndex.value = (currentMatchIndex.value + 1) % flatMatches.value.length
@@ -1074,6 +1096,7 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
       <button @click="clearAllEdits">重做</button>
       <div class="sep" />
       <button @click="exportPdf">导出PDF</button>
+      <button @click="exportPdfServer">服务端导出</button>
       <button @click="saveAnnotationsJson">导出JSON</button>
       <button @click="triggerImportJson">导入JSON</button>
       <input id="import-json" type="file" accept="application/json" style="display:none" @change="onImportJsonFile" />

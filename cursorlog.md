@@ -121,5 +121,27 @@
   - `snapshot-eaea063` / `stable-eaea063`：文本坐标对齐版本。
   - `snapshot-6134fe5` / `stable-6134fe5`：清空重做与并发渲染优化版本。
 
+2025-08-13 导出与保存（客户端）
+
+- 目标：实现导出与编辑预览一致；避免空白导出与 ArrayBuffer detached 问题；提供 JSON 导入/导出。
+- 实现：
+  - 导出：基于 `pdf-lib`，复制源 PDF 页面后，按注释数据绘制到新 PDF。
+    - 文本：统一使用 Helvetica，导出 y 轴做基线补偿（y - fontSize），与预览左上锚点对齐。
+    - 高亮：0.35 填充透明度 + 0.6 边框不透明度；矩形保留 2px 边框。
+  - 解决空白导出：加载时缓存一份独立的源 PDF 字节；上传文件 `ArrayBuffer` 使用 `slice(0)` 复制，避免被 PDF.js detach。
+  - JSON 导入/导出：工具栏按钮 `导出JSON/导入JSON`，便于注释同步与备份。
+- 待办：导出进度/大文件优化、字体嵌入与度量精细化、服务端导出路径。
+
+2025-08-13 服务端导出路径
+
+- 新增 `server/`（Node + Express）：
+  - `POST /api/annotate/flatten`：参数支持 `file`(PDF) 或 `url` + `annotations`(JSON)。
+  - 使用 `pdf-lib` 在服务端按与前端一致的规则扁平化注释（文本基线补偿、高亮透明度/边框、矩形描边）。
+  - CORS 允许来自前端域；上传大小默认 50MB。
+- Vite 代理：新增 `/api` 代理到 `VITE_API_BASE_URL`，前端新增“服务端导出”按钮。
+- 待办：
+  - 与 Stirling PDF 对接通用处理接口（合并/拆分/压缩/OCR 等）。
+  - 任务制与进度上报、鉴权与限流。
+
 
 
