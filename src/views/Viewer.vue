@@ -35,7 +35,13 @@ const pageToCount = ref<Record<number, number>>({})
 const flatMatches = ref<Array<{ page: number; rectIndex: number }>>([])
 function onChangePage(e: Event) {
   const input = e.target as HTMLInputElement
-  jumpTo(input.value)
+  const n = parseInt(input.value, 10)
+  // 这里的 n 为"视觉顺序索引"，需映射到实际页码
+  if (Number.isFinite(n) && n >= 1 && n <= numPages.value) {
+    const actual = pageOrder.value[n - 1] || n
+    pageNum.value = actual
+    renderPage()
+  }
 }
 
 // === Annotations (文本/高亮矩形/矩形/遮罩/路径/椭圆/直线/箭头/多边形) ===
@@ -185,6 +191,8 @@ async function loadPdf(urlOrData: string | ArrayBuffer) {
     pdfDoc = await loadingTask.promise
     numPages.value = pdfDoc.numPages
     pageNum.value = 1
+    // 初始化页面顺序为自然顺序
+    pageOrder.value = Array.from({ length: numPages.value }, (_, i) => i + 1)
     rotation.value = 0
     await renderPage()
     await Promise.all([renderThumbnails(), loadOutline()])
@@ -192,6 +200,7 @@ async function loadPdf(urlOrData: string | ArrayBuffer) {
     try {
       currentDocKey = await deriveDocKey(urlOrData)
       await loadAnnotationsFromStorage()
+      await loadPageOrderFromStorage()
       await renderPage()
     } catch {}
     // reset search state on new file
@@ -458,7 +467,7 @@ async function runReplaceNativeInPage() {
   }
 }
 
-// 将当前页的 PDF 原文字项全部转为“可编辑”的覆盖文本：为每个文本 item 生成遮罩 + 文本注释，并把编辑选择设为激活
+// 将当前页的 PDF 原文字项全部转为"可编辑"的覆盖文本：为每个文本 item 生成遮罩 + 文本注释，并把编辑选择设为激活
 async function startReplaceEditForPage() {
   if (!pdfDoc || !lastViewport.value) return
   const page = await pdfDoc.getPage(pageNum.value)
@@ -568,19 +577,22 @@ function rotateCounterClockwise() {
   renderPage()
 }
 function nextPage() {
-  if (pageNum.value < numPages.value) {
-    pageNum.value += 1
+  const idx = pageOrder.value.indexOf(pageNum.value)
+  if (idx >= 0 && idx < pageOrder.value.length - 1) {
+    pageNum.value = pageOrder.value[idx + 1]
     renderPage()
   }
 }
 function prevPage() {
-  if (pageNum.value > 1) {
-    pageNum.value -= 1
+  const idx = pageOrder.value.indexOf(pageNum.value)
+  if (idx > 0) {
+    pageNum.value = pageOrder.value[idx - 1]
     renderPage()
   }
 }
 function jumpTo(input: string | number) {
   const n = typeof input === 'number' ? input : parseInt(input as string, 10)
+  // 这里的 n 视为"实际页码"
   if (Number.isFinite(n) && n >= 1 && n <= numPages.value) {
     pageNum.value = n
     renderPage()
@@ -591,7 +603,8 @@ async function renderThumbnails() {
   if (!pdfDoc) return
   const results: Array<{ page: number; dataUrl: string }> = []
   const maxWidth = 120
-  for (let p = 1; p <= pdfDoc.numPages; p++) {
+  const order = pageOrder.value.length ? pageOrder.value : Array.from({ length: pdfDoc.numPages }, (_, i) => i + 1)
+  for (const p of order) {
     const page = await pdfDoc.getPage(p)
     const vp = page.getViewport({ scale: 1 })
     const scaleThumb = maxWidth / vp.width
@@ -1136,6 +1149,36 @@ function saveAnnotationsToStorage() {
     if (!currentDocKey) return
     localStorage.setItem('pdf-annotations:' + currentDocKey, JSON.stringify(annotations.value))
   } catch {}
+}
+
+function movePageUp(thumbIndex: number) {
+  if (!pdfDoc) return
+  const fromVisual = thumbIndex
+  const toVisual = Math.max(0, fromVisual - 1)
+  if (fromVisual === toVisual) return
+  // thumbnails 顺序已与 pageOrder 同步，因此可按可视索引交换 pageOrder
+  const order = pageOrder.value.slice()
+  const movingPage = order[fromVisual]
+  order.splice(fromVisual, 1)
+  order.splice(toVisual, 0, movingPage)
+  pageOrder.value = order
+  // 若当前显示页被移动，更新 pageNum 为同一实际页（不变）
+  // 重建 thumbnails 顺序并刷新
+  renderThumbnails()
+  savePageOrderToStorage()
+}
+function movePageDown(thumbIndex: number) {
+  if (!pdfDoc) return
+  const fromVisual = thumbIndex
+  const toVisual = Math.min(thumbnails.value.length - 1, fromVisual + 1)
+  if (fromVisual === toVisual) return
+  const order = pageOrder.value.slice()
+  const movingPage = order[fromVisual]
+  order.splice(fromVisual, 1)
+  order.splice(toVisual, 0, movingPage)
+  pageOrder.value = order
+  renderThumbnails()
+  savePageOrderToStorage()
 }
 
 async function loadAnnotationsFromStorage() {
@@ -2328,6 +2371,32 @@ function onKeyDownGlobal(e: KeyboardEvent) {
     scheduleAutoSave()
   }
 }
+
+// 页面顺序：元素为实际页码（1..numPages）。pageNum 始终表示"实际页码"。
+const pageOrder = ref<number[]>([])
+const currentVisualIndex = computed(() => {
+  const idx = pageOrder.value.indexOf(pageNum.value)
+  return idx >= 0 ? (idx + 1) : pageNum.value
+})
+
+async function loadPageOrderFromStorage() {
+  try {
+    if (!currentDocKey) return
+    const raw = localStorage.getItem('pdf-pageOrder:' + currentDocKey)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr) && arr.length === numPages.value && arr.every((n: any) => Number.isInteger(n))) {
+        pageOrder.value = arr as number[]
+      }
+    }
+  } catch {}
+}
+function savePageOrderToStorage() {
+  try {
+    if (!currentDocKey) return
+    localStorage.setItem('pdf-pageOrder:' + currentDocKey, JSON.stringify(pageOrder.value))
+  } catch {}
+}
 </script>
 
 <template>
@@ -2336,9 +2405,9 @@ function onKeyDownGlobal(e: KeyboardEvent) {
       <input ref="fileInputRef" type="file" accept="application/pdf" @change="onFileChange" />
       <div class="sep" />
       <button @click="prevPage">上一页</button>
-      <span>{{ pageNum }} / {{ numPages }}</span>
+      <span>{{ currentVisualIndex }} / {{ numPages }}</span>
       <button @click="nextPage">下一页</button>
-      <input style="width:80px" type="number" :max="numPages" :min="1" :value="pageNum" @change="onChangePage" />
+      <input style="width:80px" type="number" :max="numPages" :min="1" :value="currentVisualIndex" @change="onChangePage" />
       <div class="sep" />
       <button @click="zoomOut" :disabled="isEditingMode">缩小</button>
       <button @click="zoomIn" :disabled="isEditingMode">放大</button>
@@ -2394,9 +2463,13 @@ function onKeyDownGlobal(e: KeyboardEvent) {
     <div class="content">
       <aside class="sidebar">
         <div class="thumbs">
-          <div v-for="t in thumbnails" :key="t.page" class="thumb" :class="{active: t.page===pageNum}" @click="jumpTo(t.page)">
+          <div v-for="(t, idx) in thumbnails" :key="t.page" class="thumb" :class="{active: t.page===pageNum}" @click="jumpTo(t.page)">
             <img :src="t.dataUrl" :alt="'p'+t.page" />
             <span>{{ t.page }}</span>
+            <div style="display:flex; gap:4px; margin-top:4px;">
+              <button @click.stop="movePageUp(idx)" :disabled="idx===0">上移</button>
+              <button @click.stop="movePageDown(idx)" :disabled="idx===thumbnails.length-1">下移</button>
+            </div>
           </div>
         </div>
         <div class="outline" v-if="outline?.length">

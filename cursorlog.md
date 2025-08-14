@@ -228,3 +228,10 @@
   - `eraserRadius` 状态；`renderEraserCursor` 绘制预览；`eraseAtEvent` 执行命中与删除；`hitAnySegment/pointToSegmentDistance/circleRectIntersect` 几何工具函数。
   - onMouseDown/Move/Up 注入 eraser 路径；watch(toolMode) 控制 overlay cursor 样式。
   - 性能：每次擦除仅重绘注释层；结束后一次性保存。
+
+2025-08-14 页面重排（Move Up/Move Down）
+
+- 视觉顺序状态 `pageOrder` 存储实际页码数组（1..N），`pageNum` 始终为“实际页码”。
+- 翻页逻辑改为按 `pageOrder` 的邻近项移动；输入框显示/修改“视觉索引（1..N）”。
+- 侧栏缩略图为 `pageOrder` 顺序渲染，并为每个页面提供“上移/下移”，交换 `pageOrder` 后刷新缩略图并持久化到 `localStorage(pdf-pageOrder:<docKey>)`。
+- 注意：本地仅改变前端视觉顺序，不改变源 PDF 内部页序；导出仍按原始页序逐页扁平化。若需导出后的 PDF 也变更页序，需要服务端或客户端在导出阶段按 `pageOrder` 重排页面（后续可选实现）。

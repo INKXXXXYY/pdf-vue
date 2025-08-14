@@ -70,10 +70,11 @@ npm run dev
   - 新增绘图（自由画笔）：SVG 预览、折线导出，颜色/粗细可调。
 - 新增 Shapes：椭圆、直线、箭头（预览含箭头头部、渲染/导出含箭头）与多边形。
 - 新增 橡皮擦：可调半径，拖动命中即删（矩形类用外接矩形，path/多边形用点到线段距离，文本用近似宽高）。
+ - 新增 页面重排：侧栏每个缩略图提供“上移/下移”按钮；视觉顺序与缩略图一致，翻页按新顺序；顺序持久化（localStorage）。
 
 版本快照
-- 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`
-- 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`
+ - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`
+ - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`、`snapshot-reorder`
 
 开源许可
 - 本项目建议使用 MIT 许可证（LICENSE 文件）。
