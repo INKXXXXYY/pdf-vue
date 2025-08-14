@@ -68,10 +68,12 @@ npm run dev
   - 文本编辑流程（避免双层文本；打开时隐藏原节点，提交/取消后恢复；只重绘注释层）；
   - 选择模式下禁用绘制，绘制仅在高亮/矩形/绘图工具生效。
   - 新增绘图（自由画笔）：SVG 预览、折线导出，颜色/粗细可调。
+- 新增 Shapes：椭圆、直线、箭头（预览含箭头头部、渲染/导出含箭头）与多边形。
+- 新增 橡皮擦：可调半径，拖动命中即删（矩形类用外接矩形，path/多边形用点到线段距离，文本用近似宽高）。
 
- 版本快照
- - 稳定标签：`stable-5f18acd`、`stable-arrow-head`
- - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`
+版本快照
+- 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`
+- 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`
 
 开源许可
 - 本项目建议使用 MIT 许可证（LICENSE 文件）。

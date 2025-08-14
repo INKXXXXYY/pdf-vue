@@ -213,3 +213,18 @@
   - 导出：`exportPdf` 中检测 `_tool==='arrow'`，在 PDF 终点绘制两条短线形成箭头头部，角度 `±π/6`。
 - 调试：`onAnnoMouseDown` 新增 `[shape:start]` 日志，含 tool 与起点 PDF 坐标。
 - 影响范围：仅涉及 `src/views/Viewer.vue` 的注释渲染与导出逻辑，不影响文本层与图片交互。
+
+2025-08-14 橡皮擦（Eraser）
+
+- 目标：提供快速删除的编辑工具，避免逐个选择删除；对绘图路径提供手到即删的体验。
+- 交互：
+  - 工具栏新增 Eraser，可调半径；移动显示红色半透明圆形预览；按下/拖动过程中命中即删；抬起结束一次擦除，统一 snapshot + autosave。
+  - overlay 光标隐藏（自绘预览圆），文本层仍按工具规则处理 pointer-events。
+- 命中判定：
+  - path/arrow/draw 与 polygon：点到线段最短距离 ≤ 半径（PDF 坐标）。
+  - rect/highlight/mask/image/ellipse：用外接矩形与圆交叠判定。
+  - text：按文本长度与字号估算宽度，基线补偿 y - fontSize，做矩形命中。
+- 实现：
+  - `eraserRadius` 状态；`renderEraserCursor` 绘制预览；`eraseAtEvent` 执行命中与删除；`hitAnySegment/pointToSegmentDistance/circleRectIntersect` 几何工具函数。
+  - onMouseDown/Move/Up 注入 eraser 路径；watch(toolMode) 控制 overlay cursor 样式。
+  - 性能：每次擦除仅重绘注释层；结束后一次性保存。

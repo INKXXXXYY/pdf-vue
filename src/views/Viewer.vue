@@ -68,7 +68,7 @@ type Annotation = {
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'image' | 'draw'
+type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'image' | 'draw' | 'eraser'
 const toolMode = ref<ToolMode>('textSelect')
 // Replace Text inputs (暂时隐藏功能)
 // const replaceFrom = ref('')
@@ -79,6 +79,10 @@ const textFontSize = ref(14)
 const drawWidth = ref(2)
 const isDrawing = ref(false)
 let drawingStartPdf: { x: number; y: number } | null = null
+// 橡皮擦
+const eraserRadius = ref(12)
+let isErasing = false
+let erasedIdsThisDrag = new Set<string>()
 let draggingAnnoId: string | null = null
 let draggingStartPdf: { x: number; y: number } | null = null
 const lastViewport: any = ref(null)
@@ -831,6 +835,109 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const b = bigint & 255
   return { r: r / 255, g: g / 255, b: b / 255 }
 }
+// === Eraser helpers ===
+function renderEraserCursor(ev: MouseEvent) {
+  const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (!overlayDiv) return
+  const rect = overlayDiv.getBoundingClientRect()
+  const x = ev.clientX - rect.left
+  const y = ev.clientY - rect.top
+  let cur = document.getElementById('eraser-preview') as HTMLDivElement | null
+  if (!cur) {
+    cur = document.createElement('div')
+    cur.id = 'eraser-preview'
+    cur.style.position = 'absolute'
+    cur.style.pointerEvents = 'none'
+    cur.style.border = '1px solid rgba(239,68,68,0.9)'
+    cur.style.borderRadius = '50%'
+    cur.style.background = 'rgba(239,68,68,0.12)'
+    overlayDiv.appendChild(cur)
+  }
+  const r = eraserRadius.value
+  cur.style.left = `${x - r}px`
+  cur.style.top = `${y - r}px`
+  cur.style.width = `${r * 2}px`
+  cur.style.height = `${r * 2}px`
+}
+
+function eraseAtEvent(ev: MouseEvent) {
+  if (!lastViewport.value) return
+  const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (!overlayDiv) return
+  const rect = overlayDiv.getBoundingClientRect()
+  const ox = ev.clientX - rect.left
+  const oy = ev.clientY - rect.top
+  const m = getOverlayMetrics()
+  if (!m) return
+  const vp = overlayPointToViewportPoint(ox, oy)
+  const pdfPt = lastViewport.value.convertToPdfPoint(vp.x, vp.y)
+  const radiusPdf = (eraserRadius.value / m.sx) * (lastViewport.value.scale || 1)
+  const list = annotations.value[pageNum.value] || []
+  const removed: string[] = []
+  for (const a of list) {
+    if (erasedIdsThisDrag.has(a.id)) continue
+    if (a.type === 'path' && a.pts && a.pts.length >= 2) {
+      // 线/箭头/自由画：点到线段最短距离
+      if (hitAnySegment(a.pts, { x: pdfPt[0], y: pdfPt[1] }, radiusPdf)) {
+        removed.push(a.id)
+      }
+    } else if (a.type === 'polygon' && a.pts && a.pts.length >= 2) {
+      if (hitAnySegment(a.pts, { x: pdfPt[0], y: pdfPt[1] }, radiusPdf)) {
+        removed.push(a.id)
+      }
+    } else if (a.type === 'text') {
+      const approxW = Math.max(10, (a.text?.length || 1) * (a.fontSize || 14) * 0.6)
+      const approxH = (a.fontSize || 14)
+      const rx = a.x
+      const ry = a.y - approxH
+      if (circleRectIntersect(pdfPt[0], pdfPt[1], radiusPdf, rx, ry, approxW, approxH)) {
+        removed.push(a.id)
+      }
+    } else {
+      // 矩形类（rect/highlight/mask/image/ellipse 以外接矩形近似）
+      if (circleRectIntersect(pdfPt[0], pdfPt[1], radiusPdf, a.x, a.y, a.w || 0, a.h || 0)) {
+        removed.push(a.id)
+      }
+    }
+  }
+  if (removed.length > 0) {
+    const arr = annotations.value[pageNum.value]
+    if (arr) {
+      annotations.value[pageNum.value] = arr.filter(it => !removed.includes(it.id))
+      removed.forEach(id => erasedIdsThisDrag.add(id))
+      renderAnnotationsForCurrentPage(null as any)
+    }
+  }
+}
+
+function hitAnySegment(pts: Array<{ x: number; y: number }>, p: { x: number; y: number }, tol: number) {
+  for (let i = 1; i < pts.length; i++) {
+    const d = pointToSegmentDistance(p, pts[i - 1], pts[i])
+    if (d <= tol) return true
+  }
+  return false
+}
+function pointToSegmentDistance(p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) {
+  const vx = b.x - a.x
+  const vy = b.y - a.y
+  const wx = p.x - a.x
+  const wy = p.y - a.y
+  const c1 = vx * wx + vy * wy
+  if (c1 <= 0) return Math.hypot(p.x - a.x, p.y - a.y)
+  const c2 = vx * vx + vy * vy
+  if (c2 <= c1) return Math.hypot(p.x - b.x, p.y - b.y)
+  const t = c1 / c2
+  const px = a.x + t * vx
+  const py = a.y + t * vy
+  return Math.hypot(p.x - px, p.y - py)
+}
+function circleRectIntersect(cx: number, cy: number, r: number, rx: number, ry: number, rw: number, rh: number) {
+  const nearestX = Math.max(rx, Math.min(cx, rx + rw))
+  const nearestY = Math.max(ry, Math.min(cy, ry + rh))
+  const dx = cx - nearestX
+  const dy = cy - nearestY
+  return (dx * dx + dy * dy) <= r * r
+}
 function dataUrlToBytes(dataUrl: string): Uint8Array {
   const parts = dataUrl.split(',')
   const base64 = parts[1] || ''
@@ -953,7 +1060,8 @@ watch(toolMode, (mode) => {
     } else {
       // 其他工具：overlay 接管事件
       anno.style.pointerEvents = 'auto'
-      anno.style.cursor = (mode === 'select') ? 'default' : 'crosshair'
+      anno.style.cursor = (mode === 'select') ? 'default' : (mode === 'eraser' ? 'none' : 'crosshair')
+      if (mode === 'eraser') anno.classList.add('eraser'); else anno.classList.remove('eraser')
     }
   }
   if (textLayer) {
@@ -1388,6 +1496,13 @@ function onAnnoMouseDown(ev: MouseEvent) {
     // 文本选择模式：不处理注释交互，交给文本层
     return
   }
+  if (toolMode.value === 'eraser') {
+    isErasing = true
+    erasedIdsThisDrag = new Set<string>()
+    renderEraserCursor(ev)
+    eraseAtEvent(ev)
+    return
+  }
   if (toolMode.value === 'select') {
     if (target.classList.contains('anno')) {
       const id = target.dataset.id || null
@@ -1598,6 +1713,14 @@ function onAnnoMouseMove(ev: MouseEvent) {
   const x = ev.clientX - baseLeft
   const y = ev.clientY - baseTop
   const pdf = viewportToPdf(x, y)
+  // 橡皮擦：移动时更新预览并清除命中
+  if (toolMode.value === 'eraser') {
+    renderEraserCursor(ev)
+    if (isErasing) {
+      eraseAtEvent(ev)
+    }
+    return
+  }
   // 调试：鼠标移动时输出 overlay / viewport / pdf 坐标（节流 100ms）
   const now = performance.now()
   if (now - lastMoveLogTs > 100) {
@@ -1914,6 +2037,14 @@ function onAnnoMouseUp(ev: MouseEvent) {
     rotateCenterOverlay = null
     snapshot()
     scheduleAutoSave()
+    return
+  }
+  // 橡皮擦结束
+  if (toolMode.value === 'eraser') {
+    isErasing = false
+    const cur = document.getElementById('eraser-preview')
+    if (cur?.parentElement) cur.parentElement.removeChild(cur)
+    if (erasedIdsThisDrag.size > 0) { snapshot(); scheduleAutoSave() }
     return
   }
   if (toolMode.value === 'polygon' && drawingPathPts) {
@@ -2235,9 +2366,14 @@ function onKeyDownGlobal(e: KeyboardEvent) {
         <option value="arrow">箭头</option>
         <option value="polygon">多边形</option>
         <option value="draw">绘图</option>
+        <option value="eraser">橡皮擦</option>
       </select>
       <template v-if="toolMode==='draw'">
         <input style="width:60px" type="number" min="1" max="20" v-model.number="drawWidth" title="画笔粗细" />
+      </template>
+      <template v-if="toolMode==='eraser'">
+        <label>半径</label>
+        <input style="width:60px" type="number" min="6" max="48" v-model.number="eraserRadius" title="橡皮擦半径(px)" />
       </template>
       
       <input type="color" v-model="strokeColor" title="颜色" />
@@ -2314,6 +2450,7 @@ canvas { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: blo
 .hl { position: absolute; background: rgba(250, 204, 21, 0.35); outline: 1px solid rgba(234, 179, 8, 0.6); }
 .hl.current { background: rgba(59, 130, 246, 0.35); outline-color: rgba(59, 130, 246, 0.7); }
 .anno-overlay { position: absolute; inset: 0; cursor: crosshair; left: 0; top: 0; }
+  .anno-overlay.eraser { cursor: none; }
 .anno { position: absolute; }
 /* 显示手工文本层的文本选中高亮 */
 #text-layer ::selection { background: rgba(59,130,246,0.35); }
