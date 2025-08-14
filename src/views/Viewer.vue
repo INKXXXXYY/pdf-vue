@@ -748,14 +748,25 @@ async function exportPdf() {
         const size = a.fontSize || 14
         const color = a.color || '#111827'
         const rgbColor = hexToRgb(color)
-        target.drawText(a.text || '', {
-          x: a.x,
-          // align exported text visually with overlay top-left anchor
-          y: a.y - size,
-          size,
-          font: helv,
-          color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
-        })
+        const text = a.text || ''
+        if (canEncodeWinAnsi(text)) {
+          target.drawText(text, {
+            x: a.x,
+            // align exported text visually with overlay top-left anchor
+            y: a.y - size,
+            size,
+            font: helv,
+            color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
+          })
+        } else {
+          // Fallback: rasterize text to PNG to support CJK and other glyphs without embedding fonts
+          const dataUrl = renderTextToPngDataUrl(text, size, color)
+          const pngBytes = dataUrlToBytes(dataUrl)
+          const img = await newPdf.embedPng(pngBytes).catch(async () => await newPdf.embedJpg(pngBytes))
+          // canvas 绘制基线为 top，因此导出时 y 仍用 a.y - size（与上方保持一致）
+          const dims = measureTextCanvas(text, size)
+          target.drawImage(img, { x: a.x, y: a.y - size, width: dims.width, height: dims.height })
+        }
       } else if (a.type === 'highlight') {
         const color = a.color || '#facc15'
         const c = hexToRgb(color)
@@ -963,6 +974,39 @@ function dataUrlToBytes(dataUrl: string): Uint8Array {
 
 // reserved helper for potential future precise conversions
 
+function canEncodeWinAnsi(s: string): boolean {
+  // WinAnsi roughly covers 0x00..0xFF minus control chars; simplest check: ASCII only
+  // To avoid false negatives, treat as encodable if all code points < 256 and not CJK range
+  for (const ch of s) {
+    const code = ch.codePointAt(0) || 0
+    if (code < 32) return false
+    if (code > 255) return false
+  }
+  return true
+}
+
+function renderTextToPngDataUrl(text: string, fontSize: number, color: string): string {
+  const metrics = measureTextCanvas(text, fontSize)
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.ceil(metrics.width))
+  canvas.height = Math.max(1, Math.ceil(metrics.height))
+  const ctx = canvas.getContext('2d')!
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = color || '#111827'
+  ctx.textBaseline = 'top'
+  ctx.font = `${fontSize}px Helvetica, Arial, sans-serif`
+  ctx.fillText(text, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+function measureTextCanvas(text: string, fontSize: number): { width: number; height: number } {
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  ctx.font = `${fontSize}px Helvetica, Arial, sans-serif`
+  const w = Math.ceil(ctx.measureText(text).width)
+  const h = Math.ceil(fontSize * 1.2)
+  return { width: w, height: h }
+}
 function triggerPickImage() {
   const el = document.getElementById('img-file') as HTMLInputElement | null
   if (el) el.click()
