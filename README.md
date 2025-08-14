@@ -56,6 +56,8 @@ npm run dev
 注意
 - 预览/生产环境不走 Vite 代理。请使用完整地址调用后端 `http://<后端IP>:3000/api/...` 或配置反向代理。
 - 服务器默认放开 CORS（可通过环境变量 `ALLOW_ORIGIN` 自行限制）。
+ - 重要：中文导出依赖字体文件。请自行下载 CJK 字体（如 Noto Sans SC 或 Source Han Sans SC）放到 `server/fonts/` 目录，或设置环境变量 `CJK_FONT_FILE` 指向字体路径；否则包含中文的文本将无法正确导出。
+ - 若在 GitHub 网页端看不到最新 README，请确认切换到 `master` 分支并刷新页面。
 
 近期更新
 - 新增：文本选择与编辑选择工具拆分
