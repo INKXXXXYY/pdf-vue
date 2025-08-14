@@ -38,8 +38,8 @@ function onChangePage(e: Event) {
   jumpTo(input.value)
 }
 
-// === Annotations (文本/高亮矩形/矩形) ===
-type AnnotationType = 'text' | 'highlight' | 'rect' | 'image'
+// === Annotations (文本/高亮矩形/矩形/遮罩/路径) ===
+type AnnotationType = 'text' | 'highlight' | 'rect' | 'image' | 'mask' | 'path'
 type Annotation = {
   id: string
   page: number
@@ -58,14 +58,24 @@ type Annotation = {
   vy?: number
   _scale?: number
   _rotation?: number
+  // for auto-sizing from overlay rect (optional)
+  _ow?: number
+  _oh?: number
+  // 绘图路径
+  pts?: Array<{ x: number; y: number }>
+  strokeWidth?: number
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'image'
+type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'image' | 'draw'
 const toolMode = ref<ToolMode>('textSelect')
+// Replace Text inputs (暂时隐藏功能)
+// const replaceFrom = ref('')
+// const replaceTo = ref('')
 const strokeColor = ref('#facc15')
 const textColor = ref('#111827')
 const textFontSize = ref(14)
+const drawWidth = ref(2)
 const isDrawing = ref(false)
 let drawingStartPdf: { x: number; y: number } | null = null
 let draggingAnnoId: string | null = null
@@ -97,6 +107,9 @@ let resizingStartOverlay: { x: number; y: number; w: number; h: number; hx: numb
 let rotating = false
 let rotateCenterOverlay: { x: number; y: number } | null = null
 let rotateStartAngle = 0
+let drawingPathPts: Array<{ x: number; y: number }> | null = null
+let drawMoveListener: ((e: MouseEvent) => void) | null = null
+let drawUpListener: ((e: MouseEvent) => void) | null = null
 function getOverlayMetrics() {
   const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
   const canvas = canvasRef.value
@@ -341,6 +354,171 @@ async function renderPage() {
   await renderAnnotationsForCurrentPage(page)
 }
 
+// 替换当前页上的文本注释内容：基于提取到的现有注释中 type==='text' 的项
+/*
+async function runReplaceInPage() {
+  const from = replaceFrom.value
+  if (!from) return alert('请输入要查找的文本')
+  const to = replaceTo.value ?? ''
+  const list = annotations.value[pageNum.value] || []
+  let changed = 0
+  list.forEach(a => {
+    if (a.type === 'text' && a.text) {
+      const n = a.text.split(from).length - 1
+      if (n > 0) {
+        a.text = a.text.split(from).join(to)
+        changed += n
+      }
+    }
+  })
+  if (changed > 0) {
+    snapshot()
+    renderAnnotationsForCurrentPage(null as any)
+    scheduleAutoSave()
+    alert(`已替换 ${changed} 处。`)
+  } else {
+    alert('未找到可替换的文本（仅作用于当前页的文本注释）。')
+  }
+}
+
+// 用遮罩+新文本注释覆盖 PDF 原生文字（不修改原 PDF 字节，导出时会被扁平化）
+async function runReplaceNativeInPage() {
+  if (!lastViewport.value) return
+  const from = replaceFrom.value.trim()
+  const to = replaceTo.value ?? ''
+  if (!from) return alert('请输入要查找的文本')
+  const page = await pdfDoc!.getPage(pageNum.value)
+  const textContent = await page.getTextContent()
+  const items = textContent.items as any[]
+  const viewport = page.getViewport({ scale: scale.value, rotation: rotation.value })
+  const vp = (viewport as any).transform as number[]
+  const m = getOverlayMetrics()
+  if (!m) return
+  let hits = 0
+  ensurePageArray(pageNum.value)
+  for (const it of items) {
+    const s = (it.str || '')
+    if (!s) continue
+    if (!s.includes(from)) continue
+    const t = it.transform as number[]
+    const combined = multiply(vp, t)
+    const w = typeof it.width === 'number' ? it.width * (scale.value / (t[0] || 1)) : Math.max(5, s.length * 5)
+    const h = typeof it.height === 'number' ? Math.abs(it.height) : Math.abs(t?.[3] || 10)
+    const rV = rectFromTransform(combined, w, h)
+    const r = { x: rV.x * m.sx, y: rV.y * m.sy, w: rV.w * m.sx, h: rV.h * m.sy }
+    console.log('[replace:hit]', { text: s, viewportRect: rV, overlayScale: { sx: m.sx, sy: m.sy }, overlayRect: r })
+    // 生成遮罩（白底矩形）覆盖原文字
+    const idMask = genId()
+    annotations.value[pageNum.value].push({
+      id: idMask,
+      page: pageNum.value,
+      type: 'mask',
+      x: r.x,
+      y: r.y,
+      w: r.w,
+      h: Math.max(10, r.h),
+      color: '#ffffff'
+    } as any)
+    // 在遮罩位置放置新文本注释
+    const idText = genId()
+    annotations.value[pageNum.value].push({
+      id: idText,
+      page: pageNum.value,
+      type: 'text',
+      x: r.x,
+      y: r.y,
+      w: 0,
+      h: 0,
+      text: s.replaceAll(from, to),
+      color: textColor.value,
+      fontSize: Math.max(8, r.h / (scale.value || 1)),
+      vx: r.x,
+      vy: r.y,
+      _scale: scale.value,
+      _rotation: rotation.value,
+      _ow: r.w,
+      _oh: r.h,
+    })
+    console.log('[replace:created]', { mask: { id: idMask, r }, textAnno: { id: idText, x: r.x, y: r.y } })
+    hits++
+  }
+  if (hits > 0) {
+    snapshot()
+    renderAnnotationsForCurrentPage(null as any)
+    scheduleAutoSave()
+    alert(`已用遮罩+新文本覆盖 ${hits} 处 PDF 原文字。导出时将扁平化到新 PDF。`)
+  } else {
+    alert('未在当前页原文字中找到匹配内容。')
+  }
+}
+
+// 将当前页的 PDF 原文字项全部转为“可编辑”的覆盖文本：为每个文本 item 生成遮罩 + 文本注释，并把编辑选择设为激活
+async function startReplaceEditForPage() {
+  if (!pdfDoc || !lastViewport.value) return
+  const page = await pdfDoc.getPage(pageNum.value)
+  const textContent = await page.getTextContent()
+  const items = textContent.items as any[]
+  const viewport = page.getViewport({ scale: scale.value, rotation: rotation.value })
+  const vp = (viewport as any).transform as number[]
+  const m = getOverlayMetrics()
+  if (!m) return
+  ensurePageArray(pageNum.value)
+  let created = 0
+  for (const it of items) {
+    const s = (it.str || '')
+    if (!s) continue
+    const t = it.transform as number[]
+    const combined = multiply(vp, t)
+    const w = typeof it.width === 'number' ? it.width * (scale.value / (t[0] || 1)) : Math.max(5, s.length * 5)
+    const h = typeof it.height === 'number' ? Math.abs(it.height) : Math.abs(t?.[3] || 10)
+    const rV = rectFromTransform(combined, w, h)
+    const r = { x: rV.x * m.sx, y: rV.y * m.sy, w: rV.w * m.sx, h: rV.h * m.sy }
+    console.log('[editable:hit]', { text: s, viewportRect: rV, overlayScale: { sx: m.sx, sy: m.sy }, overlayRect: r })
+    const idMask = genId()
+    annotations.value[pageNum.value].push({
+      id: idMask,
+      page: pageNum.value,
+      type: 'mask',
+      x: r.x,
+      y: r.y,
+      w: r.w,
+      h: Math.max(10, r.h),
+      color: '#ffffff'
+    } as any)
+    const idText = genId()
+    annotations.value[pageNum.value].push({
+      id: idText,
+      page: pageNum.value,
+      type: 'text',
+      x: r.x,
+      y: r.y,
+      w: 0,
+      h: 0,
+      text: s,
+      color: textColor.value,
+      fontSize: Math.max(8, r.h / (scale.value || 1)),
+      vx: r.x,
+      vy: r.y,
+      _scale: scale.value,
+      _rotation: rotation.value,
+      _ow: r.w,
+      _oh: r.h,
+    })
+    console.log('[editable:created]', { mask: { id: idMask, r }, textAnno: { id: idText, x: r.x, y: r.y } })
+    created++
+  }
+  if (created > 0) {
+    snapshot()
+    toolMode.value = 'select'
+    renderAnnotationsForCurrentPage(null as any)
+    scheduleAutoSave()
+    alert(`已将 ${created} 个原文字段转为可编辑文本。你可以直接双击修改内容，并导出为新 PDF。`)
+  } else {
+    alert('未在当前页检测到可转换的原文字。')
+  }
+}
+*/
+
 function zoomIn() {
   if (isEditingMode.value) return
   scale.value = Math.min(scale.value + 0.25, 4)
@@ -577,6 +755,9 @@ async function exportPdf() {
         const color = a.color || '#f59e0b'
         const c = hexToRgb(color)
         target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(c.r, c.g, c.b), borderWidth: 2, borderOpacity: 1, color: undefined })
+      } else if (a.type === 'mask') {
+        const c = hexToRgb(a.color || '#ffffff')
+        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, color: rgb(c.r, c.g, c.b) })
       } else if (a.type === 'image' && a.src) {
         try {
           const pngBytes = dataUrlToBytes(a.src)
@@ -603,6 +784,14 @@ async function exportPdf() {
           // draw unrotated image inside its axis-aligned bounding box as approximation
           target.drawImage(png, { x: minX, y: minY, width: maxX - minX, height: maxY - minY })
         } catch {}
+      } else if (a.type === 'path' && a.pts?.length) {
+        // 近似为折线段
+        const col = hexToRgb(a.color || '#f59e0b')
+        for (let i=1;i<a.pts.length;i++) {
+          const p0 = a.pts[i-1]
+          const p1 = a.pts[i]
+          target.drawLine({ start: { x: p0.x, y: p0.y }, end: { x: p1.x, y: p1.y }, thickness: a.strokeWidth || 2, color: rgb(col.r, col.g, col.b) })
+        }
       }
     }
   }
@@ -917,6 +1106,16 @@ function viewportToPdf(xOverlay: number, yOverlay: number): { x: number; y: numb
   const pdf = lastViewport.value.convertToPdfPoint(vx, vy)
   return { x: pdf[0], y: pdf[1] }
 }
+// 保留备用：overlay 矩形转换为 PDF 矩形（导出或命中扩展时可用）
+// function overlayRectToPdfRect(ox: number, oy: number, ow: number, oh: number): { x: number; y: number; w: number; h: number } {
+//   const p1 = viewportToPdf(ox, oy)
+//   const p2 = viewportToPdf(ox + ow, oy + oh)
+//   const x = Math.min(p1.x, p2.x)
+//   const y = Math.min(p1.y, p2.y)
+//   const w = Math.abs(p2.x - p1.x)
+//   const h = Math.abs(p2.y - p1.y)
+//   return { x, y, w, h }
+// }
 function pdfRectToViewportRect(pdfRect: { x: number; y: number; w: number; h: number }) {
   if (!lastViewport.value) return pdfRect
   const m = getOverlayMetrics()
@@ -1045,11 +1244,17 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       } else if (a.type === 'rect') {
         div.style.border = `2px solid ${a.color || '#f59e0b'}`
         div.style.background = 'transparent'
+      } else if (a.type === 'mask') {
+        div.style.border = 'none'
+        div.style.background = a.color || '#ffffff'
       }
-    } else {
+      } else {
       // text: first render after creation uses stored viewport anchor to avoid timing drift
       let vx: number, vy: number
       const fontPx = (a.fontSize || 14) * (scale.value)
+      // 若存在覆盖生成时记录的原始 overlay 高度，按其近似还原字号
+      const inferred = (a as any)._oh ? Math.max(8, ((a as any)._oh) / (scale.value || 1)) : null
+      const finalFontPx = inferred || fontPx
       if (typeof a.vx === 'number' && typeof a.vy === 'number' && a._scale === scale.value && a._rotation === rotation.value) {
         vx = a.vx
         vy = a.vy
@@ -1068,13 +1273,37 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       div.style.left = `${leftPx}px`
       div.style.top = `${topPx}px`
       div.style.color = a.color || '#111827'
-      div.style.fontSize = `${fontPx}px`
+      div.style.fontSize = `${finalFontPx}px`
       div.textContent = a.text || ''
       // debug logs removed
       div.addEventListener('dblclick', (e) => {
         e.stopPropagation()
         startEditAnnotation(a.id)
       })
+    }
+    // 绘图路径渲染（使用 SVG）
+    if (a.type === 'path' && a.pts?.length) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      svg.setAttribute('width', '100%')
+      svg.setAttribute('height', '100%')
+      svg.style.position = 'absolute'
+      svg.style.left = '0'
+      svg.style.top = '0'
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      const d = a.pts.map((p, i) => {
+        const v = lastViewport.value!.convertToViewportPoint(p.x, p.y)
+        const ov = viewportPointToOverlayPoint(v[0], v[1])
+        return `${i===0?'M':'L'} ${ov.x} ${ov.y}`
+      }).join(' ')
+      path.setAttribute('d', d)
+      path.setAttribute('fill', 'none')
+      path.setAttribute('stroke', a.color || strokeColor.value)
+      path.setAttribute('stroke-width', String(a.strokeWidth || 2))
+      path.setAttribute('stroke-linecap', 'round')
+      path.setAttribute('stroke-linejoin', 'round')
+      svg.appendChild(path)
+      overlay.appendChild(svg)
+      continue
     }
     overlay.appendChild(div)
   }
@@ -1167,6 +1396,60 @@ function onAnnoMouseDown(ev: MouseEvent) {
     annotations.value[pageNum.value].push(anno)
     editingAnnoId.value = id
     renderPage().then(() => openTextEditor(id))
+    return
+  }
+  if (toolMode.value === 'draw') {
+    // 开始记录路径（overlay 坐标）
+    drawingPathPts = []
+    const ovPt = { x, y }
+    drawingPathPts.push(ovPt)
+    // 创建一个临时 SVG 覆盖层用于预览
+    const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+    if (overlayDiv && !document.getElementById('path-preview')) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      svg.setAttribute('id', 'path-preview')
+      svg.setAttribute('width', overlayDiv.style.width || '100%')
+      svg.setAttribute('height', overlayDiv.style.height || '100%')
+      svg.style.position = 'absolute'
+      svg.style.left = '0'
+      svg.style.top = '0'
+      svg.style.pointerEvents = 'none'
+      overlayDiv.appendChild(svg)
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      path.setAttribute('id', 'path-preview-d')
+      path.setAttribute('fill', 'none')
+      path.setAttribute('stroke', strokeColor.value)
+      path.setAttribute('stroke-width', String(drawWidth.value))
+      path.setAttribute('stroke-linecap', 'round')
+      path.setAttribute('stroke-linejoin', 'round')
+      path.setAttribute('d', `M ${ovPt.x} ${ovPt.y}`)
+      svg.appendChild(path)
+    }
+    // 绑定全局监听，保证路径连续
+    const overlayDiv2 = document.getElementById('anno-overlay') as HTMLDivElement | null
+    if (overlayDiv2) {
+      const hostRect = overlayDiv2.getBoundingClientRect()
+      drawMoveListener = (ev2: MouseEvent) => {
+        if (!drawingPathPts) return
+        const px = ev2.clientX - hostRect.left
+        const py = ev2.clientY - hostRect.top
+        drawingPathPts.push({ x: px, y: py })
+        const path = document.getElementById('path-preview-d') as SVGPathElement | null
+        if (path) {
+          const d = path.getAttribute('d') || ''
+          path.setAttribute('d', `${d} L ${px} ${py}`)
+        }
+      }
+      drawUpListener = (ev2: MouseEvent) => {
+        window.removeEventListener('mousemove', drawMoveListener!)
+        window.removeEventListener('mouseup', drawUpListener!)
+        // 触发 overlay 的 mouseup 逻辑收尾
+        const evt = new MouseEvent('mouseup', ev2)
+        overlayDiv2.dispatchEvent(evt)
+      }
+      window.addEventListener('mousemove', drawMoveListener)
+      window.addEventListener('mouseup', drawUpListener)
+    }
     return
   }
   if (toolMode.value === 'image' && pendingImage.value) {
@@ -1462,6 +1745,38 @@ function onAnnoMouseUp(ev: MouseEvent) {
     scheduleAutoSave()
     return
   }
+  if (toolMode.value === 'draw' && drawingPathPts) {
+    // 结束绘制：关闭预览并保存
+    if (drawMoveListener) window.removeEventListener('mousemove', drawMoveListener)
+    if (drawUpListener) window.removeEventListener('mouseup', drawUpListener)
+    drawMoveListener = null
+    drawUpListener = null
+    const overlay = ev.currentTarget as HTMLElement
+    const bounds = overlay.getBoundingClientRect()
+    const canvasRect = canvasRef.value?.getBoundingClientRect()
+    const baseLeft = canvasRect ? canvasRect.left : bounds.left
+    const baseTop = canvasRect ? canvasRect.top : bounds.top
+    const ptOverlay = { x: ev.clientX - baseLeft, y: ev.clientY - baseTop }
+    drawingPathPts.push(ptOverlay)
+    const prev = document.getElementById('path-preview')
+    if (prev?.parentElement) prev.parentElement.removeChild(prev)
+    const m = getOverlayMetrics()
+    if (m) {
+      ensurePageArray(pageNum.value)
+      const id = genId()
+      const ptsPdf = drawingPathPts.map(p => {
+        const vp = overlayPointToViewportPoint(p.x, p.y)
+        const pdf = lastViewport.value!.convertToPdfPoint(vp.x, vp.y)
+        return { x: pdf[0], y: pdf[1] }
+      })
+      annotations.value[pageNum.value].push({ id, page: pageNum.value, type: 'path', x:0,y:0,w:0,h:0, color: strokeColor.value, strokeWidth: drawWidth.value, pts: ptsPdf })
+      snapshot()
+      drawingPathPts = null
+      renderAnnotationsForCurrentPage(null as any)
+      scheduleAutoSave()
+    }
+    return
+  }
   if (!isDrawing.value || !drawingStartPdf) return
   isDrawing.value = false
   const overlay = ev.currentTarget as HTMLElement
@@ -1701,7 +2016,12 @@ function onKeyDownGlobal(e: KeyboardEvent) {
         <option value="text">文本</option>
         <option value="highlight">高亮矩形</option>
         <option value="rect">矩形</option>
+        <option value="draw">绘图</option>
       </select>
+      <template v-if="toolMode==='draw'">
+        <input style="width:60px" type="number" min="1" max="20" v-model.number="drawWidth" title="画笔粗细" />
+      </template>
+      
       <input type="color" v-model="strokeColor" title="颜色" />
       <label>字体:</label>
       <input style="width:60px" type="number" v-model.number="textFontSize" min="8" max="72" />

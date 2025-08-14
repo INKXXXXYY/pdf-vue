@@ -192,5 +192,13 @@
   - 打开时切换到 `select`，提交/取消后文本层禁用，光标恢复。
 - 版本快照：`stable-5f18acd` / `snapshot-5f18acd`。
 
+2025-08-14 绘图（自由画笔）
+
+- 新增 draw 工具：
+  - 交互：按下开始记录路径，window 级 mousemove/mouseup 全局监听保障连续绘制；SVG path 实时预览；抬起保存为 path 注释（PDF 坐标）。
+  - 渲染：注释层用 SVG path 映射到 overlay；导出时用 pdf-lib 近似为折线段（drawLine）。
+  - 配置：颜色沿用全局 `strokeColor`，粗细 `drawWidth`。
+  - 修复：预览层 pointer-events:none，避免拦截；移除重复颜色选择器。
+
 
 
