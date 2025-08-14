@@ -88,6 +88,50 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
             borderOpacity: 1,
             color: undefined,
           })
+        } else if (a.type === 'mask') {
+          const c = hexToRgb(a.color || '#ffffff')
+          page.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, color: rgb(c.r, c.g, c.b) })
+        } else if (a.type === 'ellipse') {
+          // 近似为空心矩形边框（简化）
+          const c = hexToRgb(a.color || '#f59e0b')
+          page.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(c.r, c.g, c.b), borderWidth: 2 })
+        } else if (a.type === 'path' && Array.isArray(a.pts) && a.pts.length >= 2) {
+          const c = hexToRgb(a.color || '#f59e0b')
+          for (let i = 1; i < a.pts.length; i++) {
+            const p0 = a.pts[i - 1]
+            const p1 = a.pts[i]
+            page.drawLine({ start: { x: p0.x, y: p0.y }, end: { x: p1.x, y: p1.y }, thickness: a.strokeWidth || 2, color: rgb(c.r, c.g, c.b) })
+          }
+          if (a._tool === 'arrow') {
+            const p0 = a.pts[a.pts.length - 2]
+            const p1 = a.pts[a.pts.length - 1]
+            const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x)
+            const size = 6
+            const left = { x: p1.x - size * Math.cos(angle - Math.PI / 6), y: p1.y - size * Math.sin(angle - Math.PI / 6) }
+            const right = { x: p1.x - size * Math.cos(angle + Math.PI / 6), y: p1.y - size * Math.sin(angle + Math.PI / 6) }
+            page.drawLine({ start: { x: p1.x, y: p1.y }, end: { x: left.x, y: left.y }, thickness: a.strokeWidth || 2, color: rgb(c.r, c.g, c.b) })
+            page.drawLine({ start: { x: p1.x, y: p1.y }, end: { x: right.x, y: right.y }, thickness: a.strokeWidth || 2, color: rgb(c.r, c.g, c.b) })
+          }
+        } else if (a.type === 'polygon' && Array.isArray(a.pts) && a.pts.length >= 2) {
+          const c = hexToRgb(a.color || '#f59e0b')
+          for (let i = 1; i < a.pts.length; i++) {
+            const p0 = a.pts[i - 1]
+            const p1 = a.pts[i]
+            page.drawLine({ start: { x: p0.x, y: p0.y }, end: { x: p1.x, y: p1.y }, thickness: a.strokeWidth || 2, color: rgb(c.r, c.g, c.b) })
+          }
+          // 可选：闭合多边形
+          // const first = a.pts[0], last = a.pts[a.pts.length - 1]
+          // page.drawLine({ start: { x: last.x, y: last.y }, end: { x: first.x, y: first.y }, thickness: a.strokeWidth || 2, color: rgb(c.r, c.g, c.b) })
+        } else if (a.type === 'image' && a.src) {
+          try {
+            if (typeof a.src === 'string' && a.src.startsWith('data:')) {
+              const base64 = a.src.split(',')[1] || ''
+              const bytes = Buffer.from(base64, 'base64')
+              let img
+              try { img = await outPdf.embedPng(bytes) } catch { img = await outPdf.embedJpg(bytes) }
+              page.drawImage(img, { x: a.x, y: a.y, width: a.w, height: a.h })
+            }
+          } catch {}
         }
       }
     }
