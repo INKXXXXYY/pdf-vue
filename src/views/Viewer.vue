@@ -1106,6 +1106,7 @@ onMounted(() => {
 watch(toolMode, (mode) => {
   const anno = document.getElementById('anno-overlay') as HTMLDivElement | null
   const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+  console.log('[toolMode] change', { to: mode })
   if (anno) {
     if (mode === 'textSelect') {
       // 选择：overlay 空白穿透，注释元素依然可交互
@@ -1355,6 +1356,8 @@ async function renderAnnotationsForCurrentPage(_page: any) {
   overlay.style.height = `${rect.height}px`
   overlay.innerHTML = ''
   const list = annotations.value[pageNum.value] || []
+  const polyCount = list.filter(a => a.type === 'polygon' && (a.pts?.length || 0) >= 3).length
+  console.log('[renderAnnotations] page', pageNum.value, { total: list.length, polygons: polyCount, tool: toolMode.value })
   for (const a of list) {
     const div = document.createElement('div')
     div.className = `anno ${a.type}`
@@ -1585,6 +1588,7 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       pl.setAttribute('stroke-linecap', 'round')
       pl.setAttribute('stroke-linejoin', 'round')
       svg.appendChild(pl)
+      console.log('[renderAnnotations] polygon rendered', { id: a.id, pts: a.pts.length })
       overlay.appendChild(svg)
       continue
     }
@@ -1606,11 +1610,17 @@ function onAnnoMouseDown(ev: MouseEvent) {
     // 文本选择模式：不处理注释交互，交给文本层
     return
   }
-  // 若从 polygon 切换到其他工具时，清理残留的多边形预览，避免误删或覆盖
+  // 若从 polygon 切换到其他工具时，清理残留的多边形预览与事件监听，避免误删或覆盖
   if (toolMode.value !== 'polygon') {
     const pv = document.getElementById('poly-preview')
     if (pv?.parentElement) pv.parentElement.removeChild(pv)
+    // 移除挂在 overlay 上的 dblclick 监听
+    if (polygonDblListener) {
+      try { (overlay as HTMLElement).removeEventListener('dblclick', polygonDblListener) } catch {}
+      polygonDblListener = null
+    }
     drawingPathPts = null
+    console.log('[polygon] preview cleared due to tool switch', { toTool: toolMode.value })
   }
   if (toolMode.value === 'eraser') {
     isErasing = true
@@ -1752,6 +1762,7 @@ function onAnnoMouseDown(ev: MouseEvent) {
     // 多边形：单击添加点，双击结束
     if (!drawingPathPts) drawingPathPts = []
     drawingPathPts.push({ x, y })
+    console.log('[polygon] add point', { count: drawingPathPts.length, x, y, page: pageNum.value })
     const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
     if (overlayDiv) {
       let svg = document.getElementById('poly-preview') as SVGSVGElement | null
@@ -1760,23 +1771,33 @@ function onAnnoMouseDown(ev: MouseEvent) {
         created.setAttribute('id', 'poly-preview')
         created.setAttribute('width', overlayDiv.style.width || '100%')
         created.setAttribute('height', overlayDiv.style.height || '100%')
+        // 预览层不拦截指针，双击监听挂在 overlay 上
         created.style.position = 'absolute'; created.style.left='0'; created.style.top='0'; created.style.pointerEvents='none'
         overlayDiv.appendChild(created)
         polygonDblListener = () => {
           if (!drawingPathPts || drawingPathPts.length < 3) return
+          console.log('[polygon] dblclick finalize start', { points: drawingPathPts.length, page: pageNum.value })
           const ptsPdf = drawingPathPts.map(p => {
             const vp = overlayPointToViewportPoint(p.x, p.y)
             const pdf = lastViewport.value!.convertToPdfPoint(vp.x, vp.y)
             return { x: pdf[0], y: pdf[1] }
           })
           ensurePageArray(pageNum.value)
-          annotations.value[pageNum.value].push({ id: genId(), page: pageNum.value, type: 'polygon', x:0,y:0,w:0,h:0, color: strokeColor.value, pts: ptsPdf, strokeWidth: 2 })
+          const newId = genId()
+          annotations.value[pageNum.value].push({ id: newId, page: pageNum.value, type: 'polygon', x:0,y:0,w:0,h:0, color: strokeColor.value, pts: ptsPdf, strokeWidth: 2 })
+          console.log('[polygon] saved', { id: newId, page: pageNum.value, totalOnPage: (annotations.value[pageNum.value]||[]).filter(a=>a.type==='polygon').length })
           const pv = document.getElementById('poly-preview')
           if (pv?.parentElement) pv.parentElement.removeChild(pv)
           drawingPathPts = null
+          // 移除监听，避免泄漏
+          if (polygonDblListener) {
+            try { overlayDiv.removeEventListener('dblclick', polygonDblListener) } catch {}
+            polygonDblListener = null
+          }
           snapshot(); renderAnnotationsForCurrentPage(null as any); scheduleAutoSave()
         }
-        created.addEventListener('dblclick', polygonDblListener)
+        // 将双击监听绑定到 overlay（而非预览 SVG），避免 pointer-events 影响
+        overlayDiv.addEventListener('dblclick', polygonDblListener)
         svg = created
       }
       let poly = document.getElementById('poly-preview-p') as SVGPolylineElement | null

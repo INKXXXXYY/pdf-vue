@@ -8,6 +8,7 @@
 - 注释持久化（localStorage）、JSON 导入/导出
 - 客户端导出：将注释扁平化到新 PDF（pdf-lib）
 - 服务端导出：Node/Express 接口扁平化注释并返回 PDF
+  - 支持中文等非 ASCII 文本：自动加载 CJK 字体（Noto/思源），或逐字渲染保障位置稳定
 
 本地开发（局域网可访问）
 ```bash
@@ -71,6 +72,31 @@ npm run dev
 - 新增 Shapes：椭圆、直线、箭头（预览含箭头头部、渲染/导出含箭头）与多边形。
 - 新增 橡皮擦：可调半径，拖动命中即删（矩形类用外接矩形，path/多边形用点到线段距离，文本用近似宽高）。
  - 新增 页面重排：侧栏每个缩略图提供“上移/下移”按钮；视觉顺序与缩略图一致，翻页按新顺序；顺序持久化（localStorage）。
+ - 服务端导出（中文）
+   - 内置字体加载顺序：环境变量 `CJK_FONT_FILE` > `server/fonts/` 常见文件名（含 `NotoSansSC-VariableFont_wght.ttf`）> 扫描目录挑选 `Noto/SourceHan`。
+   - 已接入 `@pdf-lib/fontkit` 并注册，支持嵌入 TTF/OTF；对可变字体关闭 subset，避免子集化导致字符缺失。
+   - 对非 ASCII 文本逐字绘制并按字体测宽推进，规避个别可变字体宽度错位。
+
+字体配置（服务端中文导出）
+```
+# 放置字体（任选一种）
+# 1) 将字体放入 server/fonts/，例如：server/fonts/NotoSansSC-VariableFont_wght.ttf
+# 2) 或设置环境变量指向字体
+#   Windows PowerShell：
+#   $env:CJK_FONT_FILE="server/fonts/NotoSansSC-VariableFont_wght.ttf"
+#   （使用 setx 永久设置后需重启进程）
+
+# 重启服务端
+npm run server
+
+# 导出时控制台应出现：
+# [server] CJK font via ...
+# [server] CJK font loaded for export
+```
+
+常见问题
+- 字体版权：推荐使用 Noto Sans SC / Source Han Sans SC（OFL 许可，可商用与嵌入）。
+- 若不希望依赖字体，可改为“中文文本栅格化为图片再嵌入”，请在 issue 中反馈。
 
 版本快照
  - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`

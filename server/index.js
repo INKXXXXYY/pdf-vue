@@ -2,6 +2,9 @@ import express from 'express'
 import multer from 'multer'
 import cors from 'cors'
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
+import fontkit from '@pdf-lib/fontkit'
+import fs from 'fs/promises'
+import path from 'path'
 
 const app = express()
 app.use(cors({ origin: process.env.ALLOW_ORIGIN || true }))
@@ -24,6 +27,65 @@ function hexToRgb(hex) {
   return { r: r / 255, g: g / 255, b: b / 255 }
 }
 
+function canEncodeWinAnsi(s) {
+  if (!s) return true
+  for (const ch of s) {
+    const code = ch.codePointAt(0) || 0
+    if (code < 32) return false
+    if (code > 255) return false
+  }
+  return true
+}
+
+async function tryLoadCjkFontBytes() {
+  // 1) 环境变量优先
+  if (process.env.CJK_FONT_FILE) {
+    try {
+      const p = process.env.CJK_FONT_FILE
+      const abs = path.isAbsolute(p) ? p : path.resolve(process.cwd(), p)
+      const buf = await fs.readFile(abs)
+      console.log('[server] CJK font via env:', abs)
+      return buf
+    } catch (e) {
+      console.warn('[server] Failed to read CJK_FONT_FILE:', e && e.message || e)
+    }
+  }
+  // 2) 常见文件名候选
+  const fixedCandidates = [
+    'server/fonts/NotoSansSC-Regular.otf',
+    'server/fonts/NotoSansSC-Regular.ttf',
+    'server/fonts/NotoSansSC-VariableFont_wght.ttf',
+    'server/fonts/SourceHanSansCN-Regular.otf',
+    'server/fonts/SourceHanSansCN-Regular.ttf',
+    'server/fonts/NotoSansCJKsc-Regular.otf',
+    'server/fonts/NotoSansCJKsc-Regular.ttf',
+    'server/fonts/SourceHanSansSC-Regular.otf',
+    'server/fonts/SourceHanSansSC-Regular.ttf',
+  ]
+  for (const p of fixedCandidates) {
+    try {
+      const abs = path.isAbsolute(p) ? p : path.resolve(process.cwd(), p)
+      const buf = await fs.readFile(abs)
+      console.log('[server] CJK font via fixed candidate:', abs)
+      return buf
+    } catch {}
+  }
+  // 3) 扫描目录 server/fonts，优先挑选含 Noto/SourceHan 的 ttf/otf
+  try {
+    const fontsDir = path.resolve(process.cwd(), 'server/fonts')
+    const items = await fs.readdir(fontsDir).catch(() => [])
+    const files = items.filter((n) => /\.(ttf|otf)$/i.test(n))
+    const prefer = files.find((n) => /(Noto|SourceHan)/i.test(n)) || files[0]
+    if (prefer) {
+      const abs = path.join(fontsDir, prefer)
+      const buf = await fs.readFile(abs)
+      console.log('[server] CJK font via directory scan:', abs)
+      return buf
+    }
+  } catch {}
+  return null
+}
+
 app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
   try {
     const annotationsJson = req.body.annotations || '{}'
@@ -41,7 +103,23 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
 
     const srcPdf = await PDFDocument.load(srcBytes)
     const outPdf = await PDFDocument.create()
+    // 注册 fontkit 以支持自定义 TTF/OTF 字体嵌入
+    try { outPdf.registerFontkit(fontkit) } catch {}
     const helv = await outPdf.embedFont(StandardFonts.Helvetica)
+    // 尝试加载 CJK 字体以支持中文等非 WinAnsi 文本
+    let cjkFont = null
+    try {
+      const cjkBytes = await tryLoadCjkFontBytes()
+      if (cjkBytes) {
+        // 对部分可变字体(VariableFont)子集化可能导致字符缺失，这里禁用子集化以保证完整性
+        cjkFont = await outPdf.embedFont(cjkBytes, { subset: false })
+        console.log('[server] CJK font loaded for export')
+      } else {
+        console.warn('[server] No CJK font found. Non-ASCII text will use Helvetica and may fail.')
+      }
+    } catch (e) {
+      console.warn('[server] Failed to load/embed CJK font:', e && e.message || e)
+    }
 
     const numPages = srcPdf.getPageCount()
     for (let p = 0; p < numPages; p++) {
@@ -54,13 +132,24 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
           const size = a.fontSize || 14
           const color = a.color || '#111827'
           const c = hexToRgb(color)
-          page.drawText(a.text || '', {
-            x: a.x,
-            y: a.y - size,
-            size,
-            font: helv,
-            color: rgb(c.r, c.g, c.b),
-          })
+          const text = a.text || ''
+          const useWinAnsi = canEncodeWinAnsi(text)
+          const fontToUse = useWinAnsi ? helv : (cjkFont || helv)
+          if (!useWinAnsi && !cjkFont) {
+            console.warn('[server] Non-ASCII text without CJK font. Expect encoding issues:', text.slice(0, 16))
+          }
+          const baseY = a.y - size
+          if (!useWinAnsi && cjkFont) {
+            // 兼容部分可变字体一次性编码失败的问题：逐字绘制，手动推进光标
+            let cursorX = a.x
+            for (const ch of text) {
+              const w = fontToUse.widthOfTextAtSize(ch, size)
+              page.drawText(ch, { x: cursorX, y: baseY, size, font: fontToUse, color: rgb(c.r, c.g, c.b) })
+              cursorX += w
+            }
+          } else {
+            page.drawText(text, { x: a.x, y: baseY, size, font: fontToUse, color: rgb(c.r, c.g, c.b) })
+          }
         } else if (a.type === 'highlight') {
           const color = a.color || '#facc15'
           const c = hexToRgb(color)
