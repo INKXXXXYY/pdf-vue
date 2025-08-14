@@ -1565,6 +1565,29 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       overlay.appendChild(svg)
       continue
     }
+    if (a.type === 'polygon' && a.pts?.length) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      svg.setAttribute('width', '100%')
+      svg.setAttribute('height', '100%')
+      svg.style.position = 'absolute'
+      svg.style.left = '0'
+      svg.style.top = '0'
+      const pl = document.createElementNS('http://www.w3.org/2000/svg', 'polyline')
+      const points = a.pts.map((p) => {
+        const v = lastViewport.value!.convertToViewportPoint(p.x, p.y)
+        const ov = viewportPointToOverlayPoint(v[0], v[1])
+        return `${ov.x},${ov.y}`
+      }).join(' ')
+      pl.setAttribute('points', points)
+      pl.setAttribute('fill', 'none')
+      pl.setAttribute('stroke', a.color || strokeColor.value)
+      pl.setAttribute('stroke-width', String(a.strokeWidth || 2))
+      pl.setAttribute('stroke-linecap', 'round')
+      pl.setAttribute('stroke-linejoin', 'round')
+      svg.appendChild(pl)
+      overlay.appendChild(svg)
+      continue
+    }
     overlay.appendChild(div)
   }
 }
@@ -1582,6 +1605,12 @@ function onAnnoMouseDown(ev: MouseEvent) {
   if (toolMode.value === 'textSelect') {
     // 文本选择模式：不处理注释交互，交给文本层
     return
+  }
+  // 若从 polygon 切换到其他工具时，清理残留的多边形预览，避免误删或覆盖
+  if (toolMode.value !== 'polygon') {
+    const pv = document.getElementById('poly-preview')
+    if (pv?.parentElement) pv.parentElement.removeChild(pv)
+    drawingPathPts = null
   }
   if (toolMode.value === 'eraser') {
     isErasing = true
