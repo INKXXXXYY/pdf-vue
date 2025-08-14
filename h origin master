@@ -1,0 +1,1 @@
+[33m5171cfb[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmaster[m[33m)[m feat(server): support CJK text on export via fontkit; auto-detect CJK fonts; fix polygon finalize; docs: add server font setup and Chinese export notes

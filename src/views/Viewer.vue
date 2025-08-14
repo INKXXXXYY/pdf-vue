@@ -74,11 +74,10 @@ type Annotation = {
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'image' | 'draw' | 'eraser'
+type ToolMode = 'textSelect' | 'replace' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'image' | 'draw' | 'eraser'
 const toolMode = ref<ToolMode>('textSelect')
-// Replace Text inputs (暂时隐藏功能)
-// const replaceFrom = ref('')
-// const replaceTo = ref('')
+// 原文替换（基于文本选择）
+const replaceTo = ref('')
 const strokeColor = ref('#facc15')
 const textColor = ref('#111827')
 const textFontSize = ref(14)
@@ -101,7 +100,7 @@ const autoSaveEnabled = ref(true)
 let saveTimer: any = null
 let currentDocKey: string | null = null
 // 编辑模式：绘制/编辑图形时才锁定，文本选择与编辑选择均视为非编辑
-const isEditingMode = computed(() => !['select'].includes(toolMode.value))
+const isEditingMode = computed(() => !['select', 'replace', 'textSelect'].includes(toolMode.value))
 // const lockFitPage = ref(false)
 let lastMoveLogTs = 0
  let lastOverlayPoint: { x: number; y: number } | null = null
@@ -331,10 +330,87 @@ async function renderPage() {
         span.dataset.y = String(r.y)
         span.dataset.w = String(r.w)
         span.dataset.h = String(r.h)
+        // 记录可视行高（overlay 像素），用于替换时估算字号
+        span.dataset.vhcss = String(fontCssPx * tlScaleY)
         textLayerDiv.appendChild(span)
         count++
       }
       console.log('[textLayer] manual layer built; spans:', count)
+      // 在原文替换模式下：给文本项增加可视边框与双击替换入口
+      if (toolMode.value === 'replace') {
+        const spans = Array.from(textLayerDiv.querySelectorAll('span')) as HTMLSpanElement[]
+        spans.forEach(sp => {
+          sp.style.outline = '1px dashed rgba(239,68,68,0.9)'
+          sp.style.background = (sp.style.background && sp.style.background !== 'transparent') ? sp.style.background : 'transparent'
+          sp.style.pointerEvents = 'auto'
+          sp.title = '双击替换此处文本'
+          sp.addEventListener('mouseenter', () => { sp.style.background = 'rgba(239,68,68,0.08)' })
+          sp.addEventListener('mouseleave', () => { sp.style.background = 'transparent' })
+          sp.addEventListener('dblclick', (ev) => {
+            ev.stopPropagation()
+            const vx = parseFloat(sp.dataset.x || '0')
+            const vy = parseFloat(sp.dataset.y || '0')
+            const vw = parseFloat(sp.dataset.w || '0')
+            const vh = parseFloat(sp.dataset.h || '0')
+            const p1 = lastViewport.value!.convertToPdfPoint(vx, vy)
+            const p2 = lastViewport.value!.convertToPdfPoint(vx + vw, vy + vh)
+            const x = Math.min(p1[0], p2[0])
+            const y = Math.min(p1[1], p2[1])
+            const w = Math.max(1, Math.abs(p2[0] - p1[0]))
+            const h = Math.max(1, Math.abs(p2[1] - p1[1]))
+            // 可视锚点：直接使用 span 的屏幕位置（已包含 text-layer 的 transform 缩放）
+            const hostRect = (host as HTMLElement).getBoundingClientRect()
+            const br = sp.getBoundingClientRect()
+            const cssLeft = br.left - hostRect.left
+            const cssTop = br.top - hostRect.top
+            const cssW = br.width
+            const cssH = br.height
+            const ovTop = { x: cssLeft, y: cssTop }
+            const rOvDbg = pdfRectToViewportRect({ x, y, w, h })
+            console.log('[replace:dbl]', {
+              spanRectOverlay: { vx, vy, vw, vh },
+              pdfRect: { x, y, w, h },
+              overlayFromPdf: rOvDbg,
+              anchorOverlay: { x: round3(ovTop.x), y: round3(ovTop.y) },
+              cssRect: { left: cssLeft, top: cssTop, width: cssW, height: cssH },
+              scale: scale.value,
+            })
+            ensurePageArray(pageNum.value)
+            // 遮罩覆盖原文（使用可视 cssRect 反算到 PDF，并在下方适度加厚）
+            const padX = Math.round(cssW * 0.05)
+            const padTop = Math.round(cssH * 0.10)
+            const padBottom = Math.round(cssH * 0.30)
+            const ox1 = cssLeft - padX
+            const oy1 = cssTop - padTop
+            const ox2 = cssLeft + cssW + padX
+            const oy2 = cssTop + cssH + padBottom
+            const vp1 = overlayPointToViewportPoint(ox1, oy1)
+            const vp2 = overlayPointToViewportPoint(ox2, oy2)
+            const pdfA = lastViewport.value!.convertToPdfPoint(vp1.x, vp1.y)
+            const pdfB = lastViewport.value!.convertToPdfPoint(vp2.x, vp2.y)
+            const mx = Math.min(pdfA[0], pdfB[0])
+            const my = Math.min(pdfA[1], pdfB[1])
+            const mw = Math.max(1, Math.abs(pdfB[0] - pdfA[0]))
+            const mh = Math.max(1, Math.abs(pdfB[1] - pdfA[1]))
+            annotations.value[pageNum.value].push({ id: genId(), page: pageNum.value, type: 'mask', x: mx, y: my, w: mw, h: mh, color: '#ffffff' } as any)
+            // 放置替换文本，默认填入原文，进入编辑；字号按 overlay 高度反推
+            const id = genId()
+            const vhCss = parseFloat(sp.dataset.vhcss || '0')
+            const fs = Math.max(8, (vhCss > 0 ? vhCss : cssH) / (scale.value || 1))
+            // 文本仍使用原 cssRect 顶点反算，避免随遮罩加厚下移
+            const vpTextLeftTop = overlayPointToViewportPoint(cssLeft, cssTop)
+            const vpTextLeftBottom = overlayPointToViewportPoint(cssLeft, cssTop + cssH)
+            const pdfTextTop = lastViewport.value!.convertToPdfPoint(vpTextLeftTop.x, vpTextLeftTop.y)
+            const pdfTextBottom = lastViewport.value!.convertToPdfPoint(vpTextLeftBottom.x, vpTextLeftBottom.y)
+            const textX = pdfTextTop[0]
+            const textY = Math.max(pdfTextTop[1], pdfTextBottom[1])
+            annotations.value[pageNum.value].push({ id, page: pageNum.value, type: 'text', x: textX, y: textY, w: 0, h: 0, text: sp.textContent || '', color: textColor.value, fontSize: fs, vx: round3(ovTop.x), vy: round3(ovTop.y), _scale: scale.value, _rotation: rotation.value, _ow: cssW, _oh: cssH })
+            snapshot()
+            editingAnnoId.value = id
+            renderPage().then(() => openTextEditor(id))
+          })
+        })
+      }
     }
   } catch {}
   // sync overlays to the actual rendered canvas size on screen
@@ -533,6 +609,114 @@ async function startReplaceEditForPage() {
   }
 }
 */
+
+// ===== Native text replace based on current selection =====
+function getCurrentSelectionSpans(): HTMLSpanElement[] {
+  const sel = window.getSelection()
+  if (!sel || sel.isCollapsed) return []
+  const host = document.getElementById('text-layer') as HTMLDivElement | null
+  if (!host) return []
+  const spans = Array.from(host.querySelectorAll('span')) as HTMLSpanElement[]
+  const result: HTMLSpanElement[] = []
+  for (const sp of spans) {
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i)
+      if (r.intersectsNode(sp)) { result.push(sp); break }
+    }
+  }
+  return result
+}
+
+function replaceSelectedText() {
+  if (!pdfDoc || !lastViewport.value) return
+  const to = (replaceTo.value ?? '').toString()
+  if (!to) { alert('请输入替换后的文本'); return }
+  // replace 模式下不依赖原生选区，允许点击任意处直接放置；
+  // 但如果当前存在原生选区（文本选择模式选择完后切换到 replace），则优先使用该选区
+  const spans = getCurrentSelectionSpans()
+  if (!spans.length) {
+    // 若没有原生选区，尝试命中当前鼠标点下的 span（便于 replace 模式下直接双击/单击后替换）
+    const tl = document.getElementById('text-layer') as HTMLDivElement | null
+    if (tl && lastOverlayPoint) {
+      const x = (lastViewportPoint?.x || 0)
+      const y = (lastViewportPoint?.y || 0)
+      const hit = Array.from(tl.querySelectorAll('span')).find(sp => {
+        const vx = parseFloat((sp as HTMLSpanElement).dataset.x || '0')
+        const vy = parseFloat((sp as HTMLSpanElement).dataset.y || '0')
+        const vw = parseFloat((sp as HTMLSpanElement).dataset.w || '0')
+        const vh = parseFloat((sp as HTMLSpanElement).dataset.h || '0')
+        return x >= vx && x <= vx + vw && y >= vy && y <= vy + vh
+      }) as HTMLSpanElement | undefined
+      if (hit) {
+        spans.push(hit)
+      }
+    }
+    if (!spans.length) { alert('未检测到选中的原文区域'); return }
+  }
+  // 计算选区在 PDF 坐标下的联合矩形
+  let minX = Number.POSITIVE_INFINITY, minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY
+  for (const sp of spans) {
+    const vx = parseFloat(sp.dataset.x || '0')
+    const vy = parseFloat(sp.dataset.y || '0')
+    const vw = parseFloat(sp.dataset.w || '0')
+    const vh = parseFloat(sp.dataset.h || '0')
+    const p1 = lastViewport.value.convertToPdfPoint(vx, vy)
+    const p2 = lastViewport.value.convertToPdfPoint(vx + vw, vy + vh)
+    const x1 = Math.min(p1[0], p2[0])
+    const y1 = Math.min(p1[1], p2[1])
+    const x2 = Math.max(p1[0], p2[0])
+    const y2 = Math.max(p1[1], p2[1])
+    minX = Math.min(minX, x1)
+    minY = Math.min(minY, y1)
+    maxX = Math.max(maxX, x2)
+    maxY = Math.max(maxY, y2)
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    alert('无法解析选区坐标')
+    return
+  }
+  const widthPdf = Math.max(1, maxX - minX)
+  const heightPdf = Math.max(1, maxY - minY)
+  ensurePageArray(pageNum.value)
+  // 1) 先放置遮罩覆盖原文本（矩形 y 取下边缘）
+  annotations.value[pageNum.value].push({
+    id: genId(), page: pageNum.value, type: 'mask', x: minX, y: minY, w: widthPdf, h: heightPdf, color: '#ffffff'
+  } as any)
+  // 2) 放置替换文本（文本 y 取上边缘），估算字号：由 PDF 高度近似
+  const host = document.getElementById('text-layer') as HTMLDivElement | null
+  const pickedSpan = host ? (Array.from(host.querySelectorAll('span')).find(sp => {
+    const vx = parseFloat((sp as HTMLSpanElement).dataset.x || '0')
+    const vy = parseFloat((sp as HTMLSpanElement).dataset.y || '0')
+    const vw = parseFloat((sp as HTMLSpanElement).dataset.w || '0')
+    const vh = parseFloat((sp as HTMLSpanElement).dataset.h || '0')
+    return (vx >= minX && vy >= minY && (vx+vw) <= (minX+widthPdf+1) && (vy+vh) <= (minY+heightPdf+1))
+  }) as HTMLSpanElement | undefined) : undefined
+  const vhCss = pickedSpan ? parseFloat(pickedSpan.dataset.vhcss || '0') : 0
+  const rOv = pdfRectToViewportRect({ x: minX, y: minY, w: widthPdf, h: heightPdf })
+  const fontSizeGuess = Math.max(8, (vhCss > 0 ? vhCss : rOv.h) / (scale.value || 1))
+  console.log('[replace:manual]', {
+    boundsPdf: { x: minX, y: minY, w: widthPdf, h: heightPdf },
+    overlayFromPdf: rOv,
+    vhCss,
+    fontSizeGuess,
+    scale: scale.value,
+  })
+  // 将顶部顶点转换为 overlay 以固定首次显示锚点
+  const vTop = lastViewport.value.convertToViewportPoint(minX, maxY)
+  const ovTop = viewportPointToOverlayPoint(vTop[0], vTop[1])
+  annotations.value[pageNum.value].push({
+    id: genId(), page: pageNum.value, type: 'text',
+    x: minX, y: maxY, w: 0, h: 0,
+    text: to, color: textColor.value, fontSize: fontSizeGuess,
+    // 直接使用 overlay 左上作为锚点，避免与画布 rect 计算带来的偏移
+    vx: round3(ovTop.x), vy: round3(ovTop.y), _scale: scale.value, _rotation: rotation.value,
+    _ow: rOv.w, _oh: rOv.h,
+  })
+  // 清除原生选区
+  try { const sel = window.getSelection(); if (sel) sel.removeAllRanges() } catch {}
+  snapshot(); renderAnnotationsForCurrentPage(null as any); scheduleAutoSave()
+}
 
 function zoomIn() {
   if (isEditingMode.value) return
@@ -1115,6 +1299,11 @@ watch(toolMode, (mode) => {
       // 恢复子元素交互
       const nodes = anno.querySelectorAll<HTMLElement>('.anno, .resize-h, .del-btn')
       nodes.forEach(n => n.style.pointerEvents = 'auto')
+    } else if (mode === 'replace') {
+      // 替换：让文本层接管事件以捕获 span 的双击；overlay 空白穿透
+      anno.style.pointerEvents = 'none'
+      anno.style.cursor = 'text'
+      if (textLayer) { textLayer.style.pointerEvents = 'auto'; textLayer.style.userSelect = 'none' }
     } else {
       // 其他工具：overlay 接管事件
       anno.style.pointerEvents = 'auto'
@@ -1124,8 +1313,21 @@ watch(toolMode, (mode) => {
   }
   if (textLayer) {
     // 文本选择工具：文本层可交互；其他工具禁用文本层
-    textLayer.style.pointerEvents = (mode === 'textSelect') ? 'auto' : 'none'
-    textLayer.style.userSelect = (mode === 'textSelect') ? 'text' : 'none'
+    if (mode === 'textSelect') {
+      textLayer.style.pointerEvents = 'auto'
+      textLayer.style.userSelect = 'text'
+    } else if (mode === 'replace') {
+      // 替换模式：需要捕获双击到 span
+      textLayer.style.pointerEvents = 'auto'
+      textLayer.style.userSelect = 'none'
+    } else {
+      textLayer.style.pointerEvents = 'none'
+      textLayer.style.userSelect = 'none'
+    }
+  }
+  // 进入原文替换模式时，强制重渲，确保文本层带上可编辑装饰
+  if (mode === 'replace') {
+    try { renderPage() } catch {}
   }
 })
 
@@ -1621,6 +1823,11 @@ function onAnnoMouseDown(ev: MouseEvent) {
     }
     drawingPathPts = null
     console.log('[polygon] preview cleared due to tool switch', { toTool: toolMode.value })
+  }
+  // 替换模式下：允许像编辑选择一样点击/框选；但 overlay 接管事件，文本层禁用点击，避免误触原生选区
+  if (toolMode.value === 'replace') {
+    const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+    if (textLayer) { textLayer.style.pointerEvents = 'none'; textLayer.style.userSelect = 'none' }
   }
   if (toolMode.value === 'eraser') {
     isErasing = true
@@ -2311,16 +2518,7 @@ function openTextEditor(id: string) {
   if (existed && existed.parentElement) existed.parentElement.removeChild(existed)
       const [vx0, vy0] = lastViewport.value.convertToViewportPoint(a.x, a.y)
       const ov = viewportPointToOverlayPoint(vx0, vy0)
-      // 以 overlay 的内容盒为定位上下文
-      const overlayRect = (document.getElementById('anno-overlay') as HTMLDivElement)?.getBoundingClientRect()
-      const canvasRect = canvasRef.value?.getBoundingClientRect()
-      if (overlayRect && canvasRect) {
-        // 若 overlay 未对齐画布，修正其相对定位偏差
-        const dx = round3(canvasRect.left - overlayRect.left)
-        const dy = round3(canvasRect.top - overlayRect.top)
-        ov.x = round3(ov.x + dx)
-        ov.y = round3(ov.y + dy)
-      }
+      // 直接使用 overlay 坐标；overlay 与画布已对齐，无需额外偏移修正
   // 编辑期间隐藏原来的文本展示节点，避免与输入框重叠
   const textNode = overlay.querySelector(`.anno.text[data-id="${id}"]`) as HTMLElement | null
   if (textNode) textNode.style.display = 'none'
@@ -2330,23 +2528,39 @@ function openTextEditor(id: string) {
   input.style.position = 'absolute'
   input.style.left = `${ov.x}px`
   input.style.top = `${ov.y}px`
+  console.log('[editor:open]', {
+    annoId: id,
+    anchorOverlay: { x: round3(ov.x), y: round3(ov.y) },
+    stored: { vx: a.vx, vy: a.vy, _ow: (a as any)._ow, _oh: (a as any)._oh, fontSize: a.fontSize },
+    scale: scale.value,
+  })
   input.style.minWidth = '120px'
   input.style.fontSize = `${(a.fontSize || 14) * (scale.value)}px`
-  input.style.lineHeight = '1.2'
-  input.style.padding = '0 4px'
+  input.style.lineHeight = '1'
+  input.style.padding = '0 2px'
   input.style.border = '1px solid #3b82f6'
+  input.style.boxSizing = 'border-box'
   input.style.background = 'transparent'
   input.style.resize = 'none'
   input.style.overflow = 'hidden'
-  input.style.height = '1.4em'
-  input.style.minHeight = '0'
-  input.style.maxHeight = '1.4em'
+  // 限制单行输入高度为覆盖框高度（优先使用记录的 overlay 高度，且不再乘以 scale）
+  const lineH = Math.max(1, ((a as any)._oh || 0))
+  if (lineH > 0) {
+    input.style.height = `${lineH}px`
+    input.style.minHeight = `${lineH}px`
+    input.style.maxHeight = `${lineH}px`
+  } else {
+    const px = (a.fontSize || 14)
+    input.style.height = `${px}px`
+    input.style.minHeight = `${px}px`
+    input.style.maxHeight = `${px}px`
+  }
   input.style.zIndex = '10'
   overlay.appendChild(input)
   // 切换到编辑选择工具并聚焦输入框
   toolMode.value = 'select'
   input.focus()
-  autoResizeTextarea(input)
+  if (!(a as any)._oh) autoResizeTextarea(input)
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -2360,7 +2574,7 @@ function openTextEditor(id: string) {
     // 避免与 keydown Enter 竞争导致重复提交/渲染过程中节点已被移除
     setTimeout(() => commitTextEditor(), 0)
   })
-  input.addEventListener('input', () => autoResizeTextarea(input))
+  if (!(a as any)._oh) input.addEventListener('input', () => autoResizeTextarea(input))
 }
 
 function commitTextEditor() {
@@ -2383,8 +2597,21 @@ function commitTextEditor() {
         a.y = pdfPt[1]
         a.vx = left
         a.vy = top
+        // 固定提交后用于渲染的字号为输入框高度对应的像素大小，避免再次放大
+        const px = parseFloat(input.style.height || '0')
+        if (px > 0) { a.fontSize = Math.max(8, px / (scale.value || 1)) }
+        // 同步 _oh，保持渲染/再次编辑一致
+        ;(a as any)._oh = px
         a._scale = scale.value
         a._rotation = rotation.value
+        console.log('[editor:commit]', {
+          annoId: a.id,
+          submitOverlay: { left, top, heightPx: px },
+          savedPdf: { x: round3(a.x), y: round3(a.y) },
+          savedOverlay: { vx: a.vx, vy: a.vy, _oh: (a as any)._oh },
+          fontSize: a.fontSize,
+          scale: scale.value,
+        })
       }
     } else {
       // empty -> remove
@@ -2517,9 +2744,16 @@ function savePageOrderToStorage() {
       <button :disabled="!searchMatches.length" @click="nextMatch">下一个</button>
       <span v-if="hasSearched">{{ searchMatches.length ? (currentMatchIndex+1) : 0 }}/{{ searchMatches.length }}</span>
       <div class="sep" />
+      <template v-if="toolMode==='textSelect' || toolMode==='replace'">
+        <label>替换为:</label>
+        <input style="width:160px" v-model="replaceTo" placeholder="输入替换后的文本" />
+        <button @click="replaceSelectedText">替换选中文本</button>
+      </template>
+      <div class="sep" />
       <label>工具:</label>
       <select v-model="toolMode">
         <option value="textSelect">文本选择</option>
+        <option value="replace">原文替换</option>
         <option value="select">编辑选择</option>
         <option value="text">文本</option>
         <option value="highlight">高亮矩形</option>
