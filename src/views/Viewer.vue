@@ -38,8 +38,8 @@ function onChangePage(e: Event) {
   jumpTo(input.value)
 }
 
-// === Annotations (文本/高亮矩形/矩形/遮罩/路径) ===
-type AnnotationType = 'text' | 'highlight' | 'rect' | 'image' | 'mask' | 'path'
+// === Annotations (文本/高亮矩形/矩形/遮罩/路径/椭圆/直线/箭头/多边形) ===
+type AnnotationType = 'text' | 'highlight' | 'rect' | 'image' | 'mask' | 'path' | 'ellipse' | 'line' | 'arrow' | 'polygon'
 type Annotation = {
   id: string
   page: number
@@ -64,10 +64,11 @@ type Annotation = {
   // 绘图路径
   pts?: Array<{ x: number; y: number }>
   strokeWidth?: number
+  _tool?: string
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'image' | 'draw'
+type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'image' | 'draw'
 const toolMode = ref<ToolMode>('textSelect')
 // Replace Text inputs (暂时隐藏功能)
 // const replaceFrom = ref('')
@@ -110,6 +111,7 @@ let rotateStartAngle = 0
 let drawingPathPts: Array<{ x: number; y: number }> | null = null
 let drawMoveListener: ((e: MouseEvent) => void) | null = null
 let drawUpListener: ((e: MouseEvent) => void) | null = null
+let polygonDblListener: ((e: MouseEvent) => void) | null = null
 function getOverlayMetrics() {
   const overlay = document.getElementById('anno-overlay') as HTMLDivElement | null
   const canvas = canvasRef.value
@@ -792,6 +794,28 @@ async function exportPdf() {
           const p1 = a.pts[i]
           target.drawLine({ start: { x: p0.x, y: p0.y }, end: { x: p1.x, y: p1.y }, thickness: a.strokeWidth || 2, color: rgb(col.r, col.g, col.b) })
         }
+        // 若原始工具为箭头，则在终点绘制一个简单箭头（等腰三角形近似）
+        if ((a as any)._tool === 'arrow' && a.pts.length >= 2) {
+          const p0 = a.pts[a.pts.length - 2]
+          const p1 = a.pts[a.pts.length - 1]
+          const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x)
+          const size = 6
+          const left = { x: p1.x - size * Math.cos(angle - Math.PI / 6), y: p1.y - size * Math.sin(angle - Math.PI / 6) }
+          const right = { x: p1.x - size * Math.cos(angle + Math.PI / 6), y: p1.y - size * Math.sin(angle + Math.PI / 6) }
+          target.drawLine({ start: { x: p1.x, y: p1.y }, end: { x: left.x, y: left.y }, thickness: a.strokeWidth || 2, color: rgb(col.r, col.g, col.b) })
+          target.drawLine({ start: { x: p1.x, y: p1.y }, end: { x: right.x, y: right.y }, thickness: a.strokeWidth || 2, color: rgb(col.r, col.g, col.b) })
+        }
+      } else if (a.type === 'ellipse') {
+        const col = hexToRgb(a.color || '#f59e0b')
+        // pdf-lib 没有直接椭圆 API，使用贝塞尔近似：这里简单用矩形边界画空心矩形代替（可后续改为 bezier）
+        target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, borderColor: rgb(col.r, col.g, col.b), borderWidth: 2 })
+      } else if (a.type === 'polygon' && a.pts?.length) {
+        const col = hexToRgb(a.color || '#f59e0b')
+        for (let i=1;i<a.pts.length;i++) {
+          const p0 = a.pts[i-1]
+          const p1 = a.pts[i]
+          target.drawLine({ start: { x: p0.x, y: p0.y }, end: { x: p1.x, y: p1.y }, thickness: a.strokeWidth || 2, color: rgb(col.r, col.g, col.b) })
+        }
       }
     }
   }
@@ -1247,6 +1271,10 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       } else if (a.type === 'mask') {
         div.style.border = 'none'
         div.style.background = a.color || '#ffffff'
+      } else if (a.type === 'ellipse') {
+        div.style.border = `2px solid ${a.color || '#f59e0b'}`
+        div.style.borderRadius = '50%'
+        div.style.background = 'transparent'
       }
       } else {
       // text: first render after creation uses stored viewport anchor to avoid timing drift
@@ -1302,6 +1330,43 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       path.setAttribute('stroke-linecap', 'round')
       path.setAttribute('stroke-linejoin', 'round')
       svg.appendChild(path)
+      // 如果是箭头工具绘制的路径，在终点添加箭头头部（两条短线）
+      if ((a as any)._tool === 'arrow' && a.pts.length >= 2) {
+        const p0 = a.pts[a.pts.length - 2]
+        const p1 = a.pts[a.pts.length - 1]
+        const v0 = lastViewport.value!.convertToViewportPoint(p0.x, p0.y)
+        const v1 = lastViewport.value!.convertToViewportPoint(p1.x, p1.y)
+        const o0 = viewportPointToOverlayPoint(v0[0], v0[1])
+        const o1 = viewportPointToOverlayPoint(v1[0], v1[1])
+        const angle = Math.atan2(o1.y - o0.y, o1.x - o0.x)
+        const headSize = Math.max(6, (a.strokeWidth || 2) * 3)
+        const leftPt = {
+          x: o1.x - headSize * Math.cos(angle - Math.PI / 6),
+          y: o1.y - headSize * Math.sin(angle - Math.PI / 6),
+        }
+        const rightPt = {
+          x: o1.x - headSize * Math.cos(angle + Math.PI / 6),
+          y: o1.y - headSize * Math.sin(angle + Math.PI / 6),
+        }
+        const line1 = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+        line1.setAttribute('x1', String(o1.x))
+        line1.setAttribute('y1', String(o1.y))
+        line1.setAttribute('x2', String(leftPt.x))
+        line1.setAttribute('y2', String(leftPt.y))
+        line1.setAttribute('stroke', a.color || strokeColor.value)
+        line1.setAttribute('stroke-width', String(a.strokeWidth || 2))
+        line1.setAttribute('stroke-linecap', 'round')
+        const line2 = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+        line2.setAttribute('x1', String(o1.x))
+        line2.setAttribute('y1', String(o1.y))
+        line2.setAttribute('x2', String(rightPt.x))
+        line2.setAttribute('y2', String(rightPt.y))
+        line2.setAttribute('stroke', a.color || strokeColor.value)
+        line2.setAttribute('stroke-width', String(a.strokeWidth || 2))
+        line2.setAttribute('stroke-linecap', 'round')
+        svg.appendChild(line1)
+        svg.appendChild(line2)
+      }
       overlay.appendChild(svg)
       continue
     }
@@ -1452,6 +1517,49 @@ function onAnnoMouseDown(ev: MouseEvent) {
     }
     return
   }
+  if (toolMode.value === 'polygon') {
+    // 多边形：单击添加点，双击结束
+    if (!drawingPathPts) drawingPathPts = []
+    drawingPathPts.push({ x, y })
+    const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+    if (overlayDiv) {
+      let svg = document.getElementById('poly-preview') as SVGSVGElement | null
+      if (!svg) {
+        const created = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as SVGSVGElement
+        created.setAttribute('id', 'poly-preview')
+        created.setAttribute('width', overlayDiv.style.width || '100%')
+        created.setAttribute('height', overlayDiv.style.height || '100%')
+        created.style.position = 'absolute'; created.style.left='0'; created.style.top='0'; created.style.pointerEvents='none'
+        overlayDiv.appendChild(created)
+        polygonDblListener = () => {
+          if (!drawingPathPts || drawingPathPts.length < 3) return
+          const ptsPdf = drawingPathPts.map(p => {
+            const vp = overlayPointToViewportPoint(p.x, p.y)
+            const pdf = lastViewport.value!.convertToPdfPoint(vp.x, vp.y)
+            return { x: pdf[0], y: pdf[1] }
+          })
+          ensurePageArray(pageNum.value)
+          annotations.value[pageNum.value].push({ id: genId(), page: pageNum.value, type: 'polygon', x:0,y:0,w:0,h:0, color: strokeColor.value, pts: ptsPdf, strokeWidth: 2 })
+          const pv = document.getElementById('poly-preview')
+          if (pv?.parentElement) pv.parentElement.removeChild(pv)
+          drawingPathPts = null
+          snapshot(); renderAnnotationsForCurrentPage(null as any); scheduleAutoSave()
+        }
+        created.addEventListener('dblclick', polygonDblListener)
+        svg = created
+      }
+      let poly = document.getElementById('poly-preview-p') as SVGPolylineElement | null
+      if (!poly) {
+        poly = document.createElementNS('http://www.w3.org/2000/svg', 'polyline') as SVGPolylineElement
+        poly.setAttribute('id', 'poly-preview-p')
+        poly.setAttribute('fill', 'none'); poly.setAttribute('stroke', strokeColor.value); poly.setAttribute('stroke-width', String(2))
+        ;(svg as SVGSVGElement).appendChild(poly)
+      }
+      const ptsAttr = drawingPathPts.map(p => `${p.x},${p.y}`).join(' ')
+      ;(poly as SVGPolylineElement).setAttribute('points', ptsAttr)
+    }
+    return
+  }
   if (toolMode.value === 'image' && pendingImage.value) {
     ensurePageArray(pageNum.value)
     const id = genId()
@@ -1474,9 +1582,10 @@ function onAnnoMouseDown(ev: MouseEvent) {
     return
   }
   // 非绘制工具下不应开始新绘制，仅在对应工具才进入绘制态
-  if (toolMode.value === 'highlight' || toolMode.value === 'rect') {
+  if (toolMode.value === 'highlight' || toolMode.value === 'rect' || toolMode.value === 'ellipse' || toolMode.value === 'line' || toolMode.value === 'arrow') {
     isDrawing.value = true
     drawingStartPdf = pdf
+    console.log('[shape:start]', { tool: toolMode.value, startPdf: drawingStartPdf })
   }
 }
 function onAnnoMouseMove(ev: MouseEvent) {
@@ -1652,11 +1761,35 @@ function onAnnoMouseMove(ev: MouseEvent) {
     }
     return
   }
-  if (!isDrawing.value || !drawingStartPdf || !(toolMode.value === 'highlight' || toolMode.value === 'rect')) return
+  if (!isDrawing.value || !drawingStartPdf || !(toolMode.value === 'highlight' || toolMode.value === 'rect' || toolMode.value === 'ellipse' || toolMode.value === 'line' || toolMode.value === 'arrow')) return
   // draw preview by updating a temp element
   const temp = document.getElementById('anno-preview') as HTMLDivElement | null
   const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
   if (!overlayDiv) return
+  // 箭头/直线预览：在 overlay 上画一条预览线（避免只显示虚框）
+  const ensureLinePreview = () => {
+    let svg = document.getElementById('line-preview') as SVGSVGElement | null
+    if (!svg) {
+      svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as SVGSVGElement
+      svg.setAttribute('id', 'line-preview')
+      svg.setAttribute('width', overlayDiv!.style.width || '100%')
+      svg.setAttribute('height', overlayDiv!.style.height || '100%')
+      svg.style.position = 'absolute'
+      svg.style.left = '0'
+      svg.style.top = '0'
+      svg.style.pointerEvents = 'none'
+      overlayDiv!.appendChild(svg)
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+      line.setAttribute('id', 'line-preview-main')
+      line.setAttribute('stroke', strokeColor.value)
+      line.setAttribute('stroke-width', '2')
+      line.setAttribute('stroke-linecap', 'round')
+      svg.appendChild(line)
+      const l1 = document.createElementNS('http://www.w3.org/2000/svg', 'line'); l1.setAttribute('id', 'line-preview-head-1'); l1.setAttribute('stroke', strokeColor.value); l1.setAttribute('stroke-width', '2'); l1.setAttribute('stroke-linecap', 'round'); svg.appendChild(l1)
+      const l2 = document.createElementNS('http://www.w3.org/2000/svg', 'line'); l2.setAttribute('id', 'line-preview-head-2'); l2.setAttribute('stroke', strokeColor.value); l2.setAttribute('stroke-width', '2'); l2.setAttribute('stroke-linecap', 'round'); svg.appendChild(l2)
+    }
+    return svg
+  }
   if (isBoxSelecting && boxSelectStart) {
     const el = document.getElementById('box-select') as HTMLDivElement | null
     const vp = overlayPointToViewportPoint(x, y)
@@ -1690,8 +1823,46 @@ function onAnnoMouseMove(ev: MouseEvent) {
   el.style.top = `${ry}px`
   el.style.width = `${rw}px`
   el.style.height = `${rh}px`
-  el.style.border = '1px dashed #3b82f6'
-  el.style.background = toolMode.value === 'highlight' ? 'rgba(250, 204, 21, 0.25)' : 'transparent'
+  if (toolMode.value === 'line' || toolMode.value === 'arrow') {
+    // 直线无需虚线辅助，隐藏预览框
+    el.style.display = 'none'
+    const svg = ensureLinePreview()
+    if (svg) {
+      const main = document.getElementById('line-preview-main') as SVGLineElement | null
+      if (main) {
+        main.setAttribute('x1', String(startV[0]))
+        main.setAttribute('y1', String(startV[1]))
+        main.setAttribute('x2', String(curV[0]))
+        main.setAttribute('y2', String(curV[1]))
+      }
+      // 箭头头部
+      const h1 = document.getElementById('line-preview-head-1') as SVGLineElement | null
+      const h2 = document.getElementById('line-preview-head-2') as SVGLineElement | null
+      if (toolMode.value === 'arrow' && h1 && h2) {
+        const angle = Math.atan2(curV[1] - startV[1], curV[0] - startV[0])
+        const headSize = 12
+        const left = { x: curV[0] - headSize * Math.cos(angle - Math.PI/6), y: curV[1] - headSize * Math.sin(angle - Math.PI/6) }
+        const right = { x: curV[0] - headSize * Math.cos(angle + Math.PI/6), y: curV[1] - headSize * Math.sin(angle + Math.PI/6) }
+        h1.setAttribute('x1', String(curV[0])); h1.setAttribute('y1', String(curV[1]))
+        h1.setAttribute('x2', String(left.x)); h1.setAttribute('y2', String(left.y))
+        h2.setAttribute('x1', String(curV[0])); h2.setAttribute('y1', String(curV[1]))
+        h2.setAttribute('x2', String(right.x)); h2.setAttribute('y2', String(right.y))
+        h1.style.display = ''
+        h2.style.display = ''
+      } else {
+        if (h1) h1.style.display = 'none'
+        if (h2) h2.style.display = 'none'
+      }
+    }
+  } else {
+    el.style.border = '1px dashed #3b82f6'
+    el.style.background = toolMode.value === 'highlight' ? 'rgba(250, 204, 21, 0.25)' : 'transparent'
+    if (toolMode.value === 'ellipse') {
+      el.style.borderRadius = '50%'
+    } else {
+      el.style.borderRadius = '0'
+    }
+  }
 }
 function onAnnoMouseUp(ev: MouseEvent) {
   if (!lastViewport.value) return
@@ -1745,6 +1916,11 @@ function onAnnoMouseUp(ev: MouseEvent) {
     scheduleAutoSave()
     return
   }
+  if (toolMode.value === 'polygon' && drawingPathPts) {
+    // 右键或 Esc 取消
+    // 在此不收尾，双击 poly svg 已处理提交
+    return
+  }
   if (toolMode.value === 'draw' && drawingPathPts) {
     // 结束绘制：关闭预览并保存
     if (drawMoveListener) window.removeEventListener('mousemove', drawMoveListener)
@@ -1777,6 +1953,22 @@ function onAnnoMouseUp(ev: MouseEvent) {
     }
     return
   }
+  if (toolMode.value === 'polygon' && drawingPathPts) {
+    // 移动时更新最后一个点为当前鼠标位置（仅用于预览）
+    const poly = document.getElementById('poly-preview-p') as SVGPolylineElement | null
+    if (poly && drawingPathPts.length) {
+      const overlay = ev.currentTarget as HTMLElement
+      const bounds = overlay.getBoundingClientRect()
+      const canvasRect = canvasRef.value?.getBoundingClientRect()
+      const baseLeft = canvasRect ? canvasRect.left : bounds.left
+      const baseTop = canvasRect ? canvasRect.top : bounds.top
+      const ox = ev.clientX - baseLeft
+      const oy = ev.clientY - baseTop
+      const tempPts = drawingPathPts.concat([{ x: ox, y: oy }])
+      poly.setAttribute('points', tempPts.map(p => `${p.x},${p.y}`).join(' '))
+    }
+    return
+  }
   if (!isDrawing.value || !drawingStartPdf) return
   isDrawing.value = false
   const overlay = ev.currentTarget as HTMLElement
@@ -1791,23 +1983,45 @@ function onAnnoMouseUp(ev: MouseEvent) {
   const y0 = Math.min(drawingStartPdf.y, endPdf.y)
   const w = Math.abs(endPdf.x - drawingStartPdf.x)
   const h = Math.abs(endPdf.y - drawingStartPdf.y)
-  const type: AnnotationType = toolMode.value === 'highlight' ? 'highlight' : 'rect'
-  if (w < 1 || h < 1) return
+  let type: AnnotationType = 'rect'
+  if (toolMode.value === 'highlight') type = 'highlight'
+  else if (toolMode.value === 'ellipse') type = 'ellipse'
+  else if (toolMode.value === 'rect') type = 'rect'
+  else if (toolMode.value === 'line') type = 'line'
+  else if (toolMode.value === 'arrow') type = 'arrow'
+  if (type !== 'line' && (w < 1 || h < 1)) return
   ensurePageArray(pageNum.value)
   snapshot()
-  annotations.value[pageNum.value].push({
-    id: genId(),
-    page: pageNum.value,
-    type,
-    x: x0,
-    y: y0,
-    w,
-    h,
-    color: strokeColor.value,
-  })
+  if (type === 'line' || type === 'arrow') {
+    // 直线存储为 path，两点
+    annotations.value[pageNum.value].push({
+      id: genId(),
+      page: pageNum.value,
+      type: 'path', // 箭头也先存为路径，两点，渲染/导出加箭头头部
+      x: 0, y: 0, w: 0, h: 0,
+      color: strokeColor.value,
+      strokeWidth: 2,
+      pts: [ { x: drawingStartPdf.x, y: drawingStartPdf.y }, { x: endPdf.x, y: endPdf.y } ],
+      // 标记来源工具
+      _tool: type,
+    })
+  } else {
+    annotations.value[pageNum.value].push({
+      id: genId(),
+      page: pageNum.value,
+      type,
+      x: x0,
+      y: y0,
+      w,
+      h,
+      color: strokeColor.value,
+    })
+  }
   // remove preview
   const temp = document.getElementById('anno-preview')
   if (temp?.parentElement) temp.parentElement.removeChild(temp)
+  const linePrev = document.getElementById('line-preview')
+  if (linePrev?.parentElement) linePrev.parentElement.removeChild(linePrev)
   // 完成绘制后仅刷新注释层，避免触发 PDF 并发渲染
   renderAnnotationsForCurrentPage(null as any)
   scheduleAutoSave()
@@ -2016,6 +2230,10 @@ function onKeyDownGlobal(e: KeyboardEvent) {
         <option value="text">文本</option>
         <option value="highlight">高亮矩形</option>
         <option value="rect">矩形</option>
+        <option value="ellipse">椭圆</option>
+        <option value="line">直线</option>
+        <option value="arrow">箭头</option>
+        <option value="polygon">多边形</option>
         <option value="draw">绘图</option>
       </select>
       <template v-if="toolMode==='draw'">

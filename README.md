@@ -69,13 +69,9 @@ npm run dev
   - 选择模式下禁用绘制，绘制仅在高亮/矩形/绘图工具生效。
   - 新增绘图（自由画笔）：SVG 预览、折线导出，颜色/粗细可调。
 
-版本快照
-- 稳定标签：`stable-5f18acd`、`stable-<new>`（本次）
-- 快照分支：`snapshot-5f18acd`、`snapshot-<new>`（本次）
-
-版本快照
-- 稳定标签：`stable-5f18acd`
-- 快照分支：`snapshot-5f18acd`
+ 版本快照
+ - 稳定标签：`stable-5f18acd`、`stable-arrow-head`
+ - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`
 
 开源许可
 - 本项目建议使用 MIT 许可证（LICENSE 文件）。

@@ -202,3 +202,14 @@
 
 
 
+
+2025-08-14 箭头形状增强（预览+渲染+导出）
+
+- 目标：箭头绘制时实时显示箭头头部；完成后渲染为带箭头的线段；导出 PDF 中也保持箭头效果。
+- 变更点：
+  - 数据：线段/箭头统一存为 `type: 'path'` + `pts:[p0,p1]`，并通过 `_tool:'arrow'` 标记箭头来源，避免破坏既有 path 表示；无需新增类型，导出/渲染时按标记判断。
+  - 预览：`onAnnoMouseMove` 增加 `line-preview` SVG，`line-preview-main` 为主线，`line-preview-head-1/2` 两短线作为箭头头部；`line/arrow` 时隐藏虚线框。
+  - 静态渲染：`renderAnnotationsForCurrentPage` 中当 `type==='path' && _tool==='arrow'`，按末段方向添加两条短线作为箭头头部，尺寸随 `strokeWidth` 放大。
+  - 导出：`exportPdf` 中检测 `_tool==='arrow'`，在 PDF 终点绘制两条短线形成箭头头部，角度 `±π/6`。
+- 调试：`onAnnoMouseDown` 新增 `[shape:start]` 日志，含 tool 与起点 PDF 坐标。
+- 影响范围：仅涉及 `src/views/Viewer.vue` 的注释渲染与导出逻辑，不影响文本层与图片交互。
