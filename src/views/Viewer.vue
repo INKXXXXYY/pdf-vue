@@ -2,6 +2,7 @@
 import { onMounted, ref, watch, computed, nextTick } from 'vue'
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
+import 'pdfjs-dist/web/pdf_viewer.css'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 // @ts-ignore - vite can bundle this entry as worker
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker?worker&url'
@@ -60,8 +61,8 @@ type Annotation = {
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'select' | 'text' | 'highlight' | 'rect' | 'image'
-const toolMode = ref<ToolMode>('select')
+type ToolMode = 'textSelect' | 'select' | 'text' | 'highlight' | 'rect' | 'image'
+const toolMode = ref<ToolMode>('textSelect')
 const strokeColor = ref('#facc15')
 const textColor = ref('#111827')
 const textFontSize = ref(14)
@@ -69,7 +70,6 @@ const isDrawing = ref(false)
 let drawingStartPdf: { x: number; y: number } | null = null
 let draggingAnnoId: string | null = null
 let draggingStartPdf: { x: number; y: number } | null = null
-let draggingOriginPdf: { x: number; y: number } | null = null
 const lastViewport: any = ref(null)
 // keep original PDF bytes for export
 let originalPdfBytes: ArrayBuffer | null = null
@@ -79,14 +79,18 @@ const pendingImage = ref<{ src: string; naturalWidth: number; naturalHeight: num
 const autoSaveEnabled = ref(true)
 let saveTimer: any = null
 let currentDocKey: string | null = null
-// 编辑模式下强制整页适配并锁定缩放/旋转
-const isEditingMode = computed(() => toolMode.value !== 'select')
+// 编辑模式：绘制/编辑图形时才锁定，文本选择与编辑选择均视为非编辑
+const isEditingMode = computed(() => !['select'].includes(toolMode.value))
 // const lockFitPage = ref(false)
 let lastMoveLogTs = 0
  let lastOverlayPoint: { x: number; y: number } | null = null
  let lastViewportPoint: { x: number; y: number } | null = null
  let lastPdfPoint: { x: number; y: number } | null = null
 const selectedAnnoId = ref<string | null>(null)
+const selectedAnnoIds = ref<string[]>([])
+let draggingOriginsById: Record<string, { x: number; y: number }> = {}
+let isBoxSelecting = false
+let boxSelectStart: { x: number; y: number } | null = null
 let resizingHandle: 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w' | null = null
 let resizingStartRect: { x: number; y: number; w: number; h: number } | null = null
 let resizingStartOverlay: { x: number; y: number; w: number; h: number; hx: number; hy: number } | null = null
@@ -210,6 +214,101 @@ async function renderPage() {
   canvas.height = Math.ceil(viewport.height)
   await page.render({ canvasContext: ctx, viewport, canvas }).promise
   lastViewport.value = viewport
+  // 启用原生文本层以允许选择 PDF 文本
+  try {
+    console.log('[textLayer] init start', { page: pageNum.value, vw: viewport.width, vh: viewport.height, scale: (viewport as any).scale })
+    const textLayerDivId = 'text-layer'
+    let textLayerDiv = document.getElementById(textLayerDivId) as HTMLDivElement | null
+    const host = canvas.parentElement as HTMLElement | null
+    if (host) {
+      if (!textLayerDiv) {
+        textLayerDiv = document.createElement('div')
+        textLayerDiv.id = textLayerDivId
+        textLayerDiv.className = 'textLayer'
+        textLayerDiv.style.position = 'absolute'
+        textLayerDiv.style.inset = '0'
+        textLayerDiv.style.left = '0px'
+        textLayerDiv.style.top = '0px'
+        textLayerDiv.style.pointerEvents = 'auto'
+        textLayerDiv.style.userSelect = 'text'
+        textLayerDiv.style.zIndex = '5'
+        textLayerDiv.addEventListener('mousedown', (e) => {
+          const el = e.target as HTMLElement
+          if (el && el.tagName === 'SPAN') {
+            const hostRect = host.getBoundingClientRect()
+            const br = el.getBoundingClientRect()
+            const css = { left: br.left - hostRect.left, top: br.top - hostRect.top, width: br.width, height: br.height }
+            const data = {
+              x: parseFloat(el.dataset.x || 'NaN'),
+              y: parseFloat(el.dataset.y || 'NaN'),
+              w: parseFloat(el.dataset.w || 'NaN'),
+              h: parseFloat(el.dataset.h || 'NaN'),
+            }
+            console.log('[textLayer:hit]', { text: el.textContent, styleLeft: el.style.left, styleTop: el.style.top, dataRect: data, cssRect: css })
+          } else {
+            console.log('[textLayer] mousedown on', el?.className)
+          }
+        })
+        host.appendChild(textLayerDiv)
+        console.log('[textLayer] created and appended to host')
+      }
+      const rectCss = canvas.getBoundingClientRect()
+      // 内部尺寸按 viewport（画布像素），通过 transform 缩放到 CSS 尺寸
+      textLayerDiv.style.width = `${viewport.width}px`
+      textLayerDiv.style.height = `${viewport.height}px`
+      textLayerDiv.style.transformOrigin = '0 0'
+      const tlScaleX = rectCss.width / viewport.width
+      const tlScaleY = rectCss.height / viewport.height
+      ;(textLayerDiv as any)._scaleX = tlScaleX
+      ;(textLayerDiv as any)._scaleY = tlScaleY
+      textLayerDiv.style.transform = `scale(${tlScaleX}, ${tlScaleY})`
+      // 清空旧层
+      textLayerDiv.innerHTML = ''
+      const textContent = await page.getTextContent()
+      console.log('[textLayer] textContent items:', (textContent.items || []).length)
+      // Build a minimal selectable text layer without importing pdf_viewer to avoid module resolution errors
+      const vp = (viewport as any).transform as number[]
+      const items = (textContent.items || []) as any[]
+      let count = 0
+      for (const it of items) {
+        const s = it.str || ''
+        if (!s) continue
+        const t = it.transform as number[]
+        const combined = multiply(vp, t)
+        // 将 PDF 文本宽高换算为视口像素：沿用搜索高亮的计算方式
+        const w = typeof it.width === 'number' ? it.width * (scale.value / (t[0] || 1)) : Math.max(5, s.length * 5)
+        const h = typeof it.height === 'number' ? Math.abs(it.height) : Math.abs(t?.[3] || 10)
+        const r = rectFromTransform(combined, w, h)
+        const span = document.createElement('span')
+        span.style.position = 'absolute'
+        // 不设置固定宽高，避免整块；控制较小的可选中高亮高度
+        span.style.whiteSpace = 'pre'
+        span.style.display = 'inline-block'
+        // 使用固定较小的视觉字号/行高，避免选区高度过大
+        const fontCssPx = 12
+        span.style.left = `${r.x}px`
+        // 许多 PDF 文本矩形的 y 为块的底边；将高亮条顶部放在 (y + h - 行高)
+        span.style.top = `${r.y + Math.max(0, r.h - fontCssPx)}px`
+        span.style.fontSize = `${fontCssPx}px`
+        span.style.lineHeight = `${fontCssPx}px`
+        span.style.height = `${fontCssPx}px`
+        span.style.overflow = 'hidden'
+        span.style.color = 'transparent'
+        ;(span.style as any)["-webkit-text-fill-color"] = 'transparent'
+        span.style.caretColor = 'transparent'
+        span.style.background = 'transparent'
+        span.style.userSelect = 'text'
+        span.textContent = s
+        span.dataset.x = String(r.x)
+        span.dataset.y = String(r.y)
+        span.dataset.w = String(r.w)
+        span.dataset.h = String(r.h)
+        textLayerDiv.appendChild(span)
+        count++
+      }
+      console.log('[textLayer] manual layer built; spans:', count)
+    }
+  } catch {}
   // sync overlays to the actual rendered canvas size on screen
   const rect = canvas.getBoundingClientRect()
   const hl = document.getElementById('hl-overlay') as HTMLDivElement | null
@@ -225,6 +324,18 @@ async function renderPage() {
     anno.style.height = `${rect.height}px`
     anno.style.left = `0px`
     anno.style.top = `0px`
+    // 在文本选择工具下，允许穿透空白区域到文本层，实现原生文本选择
+    if (toolMode.value === 'textSelect') {
+      // 只让注释元素可点，空白穿透
+      anno.style.pointerEvents = 'auto'
+      ;(anno.style as any).setProperty('--anno-events', 'auto')
+      // 给注释元素统一 class 以控制命中区域
+      // 已有 .anno 元素设置 pointer-events: auto
+      anno.style.cursor = 'text'
+    } else {
+      anno.style.pointerEvents = 'auto'
+      anno.style.cursor = 'crosshair'
+    }
   }
   await renderHighlightsForCurrentPage(page)
   await renderAnnotationsForCurrentPage(page)
@@ -615,6 +726,30 @@ onMounted(() => {
   window.addEventListener('keydown', onKeyDownGlobal)
 })
 
+watch(toolMode, (mode) => {
+  const anno = document.getElementById('anno-overlay') as HTMLDivElement | null
+  const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+  if (anno) {
+    if (mode === 'textSelect') {
+      // 选择：overlay 空白穿透，注释元素依然可交互
+      anno.style.pointerEvents = 'none'
+      anno.style.cursor = 'text'
+      // 恢复子元素交互
+      const nodes = anno.querySelectorAll<HTMLElement>('.anno, .resize-h, .del-btn')
+      nodes.forEach(n => n.style.pointerEvents = 'auto')
+    } else {
+      // 其他工具：overlay 接管事件
+      anno.style.pointerEvents = 'auto'
+      anno.style.cursor = (mode === 'select') ? 'default' : 'crosshair'
+    }
+  }
+  if (textLayer) {
+    // 文本选择工具：文本层可交互；其他工具禁用文本层
+    textLayer.style.pointerEvents = (mode === 'textSelect') ? 'auto' : 'none'
+    textLayer.style.userSelect = (mode === 'textSelect') ? 'text' : 'none'
+  }
+})
+
 // ===== In-page highlight helpers =====
 function multiply(m1: number[], m2: number[]) {
   const [a1, b1, c1, d1, e1, f1] = m1
@@ -721,6 +856,15 @@ async function renderHighlightsForCurrentPage(page: any) {
   const rect = canvasRef.value.getBoundingClientRect()
   overlay.style.width = `${rect.width}px`
   overlay.style.height = `${rect.height}px`
+  // 文本选择工具下：为避免占满整层的空白挡住文本层，把 overlay 置为 pointer-events:none，子元素保持可交互
+  if (toolMode.value === 'textSelect') {
+    overlay.style.pointerEvents = 'none'
+    // 但让实际注释元素可交互
+    const annoNodes = overlay.querySelectorAll<HTMLElement>('.anno, .resize-h, .del-btn')
+    annoNodes.forEach(n => { n.style.pointerEvents = 'auto' })
+  } else {
+    overlay.style.pointerEvents = 'auto'
+  }
   overlay.innerHTML = ''
   const q = searchQuery.value.trim().toLowerCase()
   if (!q) return
@@ -835,6 +979,7 @@ async function renderAnnotationsForCurrentPage(_page: any) {
           handle.style.background = '#3b82f6'
           handle.style.borderRadius = '2px'
           handle.style.pointerEvents = 'auto'
+          handle.style.zIndex = '10'
           if (pos==='se'){ handle.style.left = `${r.x + r.w - 5}px`; handle.style.top = `${r.y + r.h - 5}px`; handle.style.cursor = 'nwse-resize' }
           if (pos==='n'){ handle.style.left = `${r.x + r.w/2 - 4}px`; handle.style.top = `${r.y - 4}px`; handle.style.cursor = 'ns-resize' }
           if (pos==='s'){ handle.style.left = `${r.x + r.w/2 - 4}px`; handle.style.top = `${r.y + r.h - 4}px`; handle.style.cursor = 'ns-resize' }
@@ -870,6 +1015,7 @@ async function renderAnnotationsForCurrentPage(_page: any) {
         del.style.placeItems = 'center'
         del.style.cursor = 'pointer'
         del.style.zIndex = '20'
+        del.style.pointerEvents = 'auto'
         del.textContent = '×'
         del.className = 'del-btn'
         del.dataset.id = a.id
@@ -944,21 +1090,52 @@ function onAnnoMouseDown(ev: MouseEvent) {
   const x = ev.clientX - baseLeft
   const y = ev.clientY - baseTop
   const pdf = viewportToPdf(x, y)
+  if (toolMode.value === 'textSelect') {
+    // 文本选择模式：不处理注释交互，交给文本层
+    return
+  }
   if (toolMode.value === 'select') {
     if (target.classList.contains('anno')) {
-      draggingAnnoId = target.dataset.id || null
-      selectedAnnoId.value = draggingAnnoId
+      const id = target.dataset.id || null
+      const isShift = (ev as MouseEvent).shiftKey
+      draggingAnnoId = id
       resizingHandle = null
       rotating = false
-      if (draggingAnnoId) {
-        draggingStartPdf = pdf
-        const a = (annotations.value[pageNum.value] || []).find(i => i.id === draggingAnnoId)!
-        draggingOriginPdf = { x: a.x, y: a.y }
+      if (!isShift) {
+        selectedAnnoIds.value = id ? [id] : []
+        selectedAnnoId.value = id
+      } else if (id) {
+        if (selectedAnnoIds.value.includes(id)) {
+          selectedAnnoIds.value = selectedAnnoIds.value.filter(i => i !== id)
+        } else {
+          selectedAnnoIds.value = [...selectedAnnoIds.value, id]
+        }
+        selectedAnnoId.value = selectedAnnoIds.value[0] || null
       }
-    }
-    // 点击空白处取消选中
-    if (!target.classList.contains('anno')) {
-      selectedAnnoId.value = null
+      if (selectedAnnoIds.value.length > 0) {
+        draggingStartPdf = pdf
+        draggingOriginsById = {}
+        const list = annotations.value[pageNum.value] || []
+        selectedAnnoIds.value.forEach(selId => {
+          const a = list.find(i => i.id === selId)
+          if (a) draggingOriginsById[selId] = { x: a.x, y: a.y }
+        })
+      }
+    } else {
+      // 空白处：开始框选以便多选编辑
+      isBoxSelecting = true
+      const vp = overlayPointToViewportPoint(x, y)
+      const ov = viewportPointToOverlayPoint(vp.x, vp.y)
+      boxSelectStart = { x: ov.x, y: ov.y }
+      const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+      if (overlayDiv && !document.getElementById('box-select')) {
+        const el = document.createElement('div')
+        el.id = 'box-select'
+        el.style.position = 'absolute'
+        el.style.border = '1px dashed #10b981'
+        el.style.background = 'rgba(16,185,129,0.15)'
+        overlayDiv.appendChild(el)
+      }
     }
     return
   }
@@ -1013,9 +1190,11 @@ function onAnnoMouseDown(ev: MouseEvent) {
     renderPage()
     return
   }
-  // rect / highlight draw start
-  isDrawing.value = true
-  drawingStartPdf = pdf
+  // 非绘制工具下不应开始新绘制，仅在对应工具才进入绘制态
+  if (toolMode.value === 'highlight' || toolMode.value === 'rect') {
+    isDrawing.value = true
+    drawingStartPdf = pdf
+  }
 }
 function onAnnoMouseMove(ev: MouseEvent) {
   if (!lastViewport.value) return
@@ -1046,23 +1225,21 @@ function onAnnoMouseMove(ev: MouseEvent) {
     const pdfFromCache = lastViewport.value.convertToPdfPoint(vpCache.x, vpCache.y)
     ;(lastPdfPoint as any) = { x: pdfFromCache[0], y: pdfFromCache[1] }
   }
-  if (draggingAnnoId && draggingStartPdf && draggingOriginPdf) {
+  if (draggingAnnoId && draggingStartPdf && Object.keys(draggingOriginsById).length > 0) {
     const dx = pdf.x - draggingStartPdf.x
     const dy = pdf.y - draggingStartPdf.y
     const list = annotations.value[pageNum.value] || []
-    const a = list.find(i => i.id === draggingAnnoId)
-    if (a) {
-      a.x = (draggingOriginPdf.x + dx)
-      a.y = (draggingOriginPdf.y + dy)
-      // 清空文本锚点，确保文本在拖动时根据 PDF 坐标实时转换
-      if (a.type === 'text') {
-        a.vx = undefined
-        a.vy = undefined
+    selectedAnnoIds.value.forEach(id => {
+      const a = list.find(i => i.id === id)
+      const origin = draggingOriginsById[id]
+      if (a && origin) {
+        a.x = origin.x + dx
+        a.y = origin.y + dy
+        if (a.type === 'text') { a.vx = undefined; a.vy = undefined }
       }
-      // 仅重绘注释覆盖层，避免触发 PDF 画布的并发渲染
-      renderAnnotationsForCurrentPage(null as any)
-      scheduleAutoSave()
-    }
+    })
+    renderAnnotationsForCurrentPage(null as any)
+    scheduleAutoSave()
     return
   }
   // resizing image
@@ -1192,11 +1369,26 @@ function onAnnoMouseMove(ev: MouseEvent) {
     }
     return
   }
-  if (!isDrawing.value || !drawingStartPdf) return
+  if (!isDrawing.value || !drawingStartPdf || !(toolMode.value === 'highlight' || toolMode.value === 'rect')) return
   // draw preview by updating a temp element
   const temp = document.getElementById('anno-preview') as HTMLDivElement | null
   const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
   if (!overlayDiv) return
+  if (isBoxSelecting && boxSelectStart) {
+    const el = document.getElementById('box-select') as HTMLDivElement | null
+    const vp = overlayPointToViewportPoint(x, y)
+    const ov = viewportPointToOverlayPoint(vp.x, vp.y)
+    const rx = Math.min(boxSelectStart.x, ov.x)
+    const ry = Math.min(boxSelectStart.y, ov.y)
+    const rw = Math.abs(ov.x - boxSelectStart.x)
+    const rh = Math.abs(ov.y - boxSelectStart.y)
+    if (el) {
+      el.style.left = `${rx}px`
+      el.style.top = `${ry}px`
+      el.style.width = `${rw}px`
+      el.style.height = `${rh}px`
+    }
+  }
   const startV = lastViewport.value.convertToViewportPoint(drawingStartPdf.x, drawingStartPdf.y)
   const curV = [x, y]
   const rx = Math.min(startV[0], curV[0])
@@ -1220,10 +1412,38 @@ function onAnnoMouseMove(ev: MouseEvent) {
 }
 function onAnnoMouseUp(ev: MouseEvent) {
   if (!lastViewport.value) return
+  if (isBoxSelecting) {
+    const overlayDiv = document.getElementById('anno-overlay') as HTMLDivElement | null
+    const el = document.getElementById('box-select')
+    if (overlayDiv && el && boxSelectStart) {
+      overlayDiv.removeChild(el)
+      // 计算选择范围（overlay 坐标）
+      const rect = el.getBoundingClientRect()
+      const host = overlayDiv.getBoundingClientRect()
+      const rx = rect.left - host.left
+      const ry = rect.top - host.top
+      const rw = rect.width
+      const rh = rect.height
+      // 命中测试
+      const list = annotations.value[pageNum.value] || []
+      const hit: string[] = []
+      list.forEach(a => {
+        const r = pdfRectToViewportRect(a)
+        const overlap = !(r.x + r.w < rx || r.x > rx + rw || r.y + r.h < ry || r.y > ry + rh)
+        if (overlap) hit.push(a.id)
+      })
+      selectedAnnoIds.value = hit
+      selectedAnnoId.value = hit[0] || null
+    }
+    isBoxSelecting = false
+    boxSelectStart = null
+    snapshot()
+    return
+  }
   if (draggingAnnoId) {
     draggingAnnoId = null
     draggingStartPdf = null
-    draggingOriginPdf = null
+    draggingOriginsById = {}
     snapshot()
     return
   }
@@ -1289,6 +1509,9 @@ function openTextEditor(id: string) {
   const list = annotations.value[pageNum.value] || []
   const a = list.find(i => i.id === id)
   if (!a) return
+  // 若已有编辑器，先移除，避免出现多个输入框
+  const existed = document.getElementById('anno-editor') as HTMLTextAreaElement | null
+  if (existed && existed.parentElement) existed.parentElement.removeChild(existed)
       const [vx0, vy0] = lastViewport.value.convertToViewportPoint(a.x, a.y)
       const ov = viewportPointToOverlayPoint(vx0, vy0)
       // 以 overlay 的内容盒为定位上下文
@@ -1301,6 +1524,9 @@ function openTextEditor(id: string) {
         ov.x = round3(ov.x + dx)
         ov.y = round3(ov.y + dy)
       }
+  // 编辑期间隐藏原来的文本展示节点，避免与输入框重叠
+  const textNode = overlay.querySelector(`.anno.text[data-id="${id}"]`) as HTMLElement | null
+  if (textNode) textNode.style.display = 'none'
   const input = document.createElement('textarea')
   input.id = 'anno-editor'
   input.value = a.text || ''
@@ -1320,6 +1546,8 @@ function openTextEditor(id: string) {
   input.style.maxHeight = '1.4em'
   input.style.zIndex = '10'
   overlay.appendChild(input)
+  // 切换到编辑选择工具并聚焦输入框
+  toolMode.value = 'select'
   input.focus()
   autoResizeTextarea(input)
   input.addEventListener('keydown', (e) => {
@@ -1370,7 +1598,14 @@ function commitTextEditor() {
   }
   input.remove()
   editingAnnoId.value = null
-  renderPage()
+  // 仅重绘注释层避免 PDF 重渲；并确保文本层被禁用，避免仍是文本光标
+  renderAnnotationsForCurrentPage(null as any)
+  // 恢复原文本节点可见
+  const ov = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (ov && a) {
+    const node = ov.querySelector(`.anno.text[data-id="${a.id}"]`) as HTMLElement | null
+    if (node) node.style.display = ''
+  }
   scheduleAutoSave()
 }
 
@@ -1387,7 +1622,13 @@ function cancelTextEditor() {
     }
   }
   editingAnnoId.value = null
-  renderPage()
+  renderAnnotationsForCurrentPage(null as any)
+  // 恢复原文本节点可见
+  const ov = document.getElementById('anno-overlay') as HTMLDivElement | null
+  if (ov) {
+    const node = ov.querySelector(`.anno.text[data-id]`) as HTMLElement | null
+    if (node) node.style.display = ''
+  }
 }
 
 function clearAllEdits() {
@@ -1412,18 +1653,19 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
 
 function onKeyDownGlobal(e: KeyboardEvent) {
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    const id = selectedAnnoId.value
-    if (!id) return
+    const ids = selectedAnnoIds.value.length ? selectedAnnoIds.value : (selectedAnnoId.value ? [selectedAnnoId.value] : [])
+    if (!ids.length) return
     const list = annotations.value[pageNum.value] || []
-    const idx = list.findIndex(i => i.id === id)
-    if (idx >= 0) {
-      e.preventDefault()
-      snapshot()
-      list.splice(idx, 1)
-      selectedAnnoId.value = null
-      renderAnnotationsForCurrentPage(null as any)
-      scheduleAutoSave()
-    }
+    e.preventDefault()
+    snapshot()
+    ids.forEach(id => {
+      const idx = list.findIndex(i => i.id === id)
+      if (idx >= 0) list.splice(idx, 1)
+    })
+    selectedAnnoIds.value = []
+    selectedAnnoId.value = null
+    renderAnnotationsForCurrentPage(null as any)
+    scheduleAutoSave()
   }
 }
 </script>
@@ -1454,7 +1696,8 @@ function onKeyDownGlobal(e: KeyboardEvent) {
       <div class="sep" />
       <label>工具:</label>
       <select v-model="toolMode">
-        <option value="select">选择</option>
+        <option value="textSelect">文本选择</option>
+        <option value="select">编辑选择</option>
         <option value="text">文本</option>
         <option value="highlight">高亮矩形</option>
         <option value="rect">矩形</option>
@@ -1534,10 +1777,13 @@ canvas { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: blo
 .hl.current { background: rgba(59, 130, 246, 0.35); outline-color: rgba(59, 130, 246, 0.7); }
 .anno-overlay { position: absolute; inset: 0; cursor: crosshair; left: 0; top: 0; }
 .anno { position: absolute; }
+/* 显示手工文本层的文本选中高亮 */
+#text-layer ::selection { background: rgba(59,130,246,0.35); }
 .anno#anno-editor { position: absolute; }
 .anno.text { pointer-events: auto; user-select: none; background: transparent; }
 .anno.rect { background: transparent; }
 .anno.preview { pointer-events: none; }
 .error { color: #c62828; padding: 8px 12px; }
 </style>
+
 
