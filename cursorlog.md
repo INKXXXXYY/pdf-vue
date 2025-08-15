@@ -296,3 +296,57 @@
 - 创建稳定标签：`stable-underline-fix` (提交哈希: `e043e4b`)
 - 提交信息：`feat: 重构下划线功能，实现精确文本选择定位`
 - 推送到远端：`https://github.com/INKXXXXYY/pdf-vue.git`
+
+2025-08-15 页面重排导出功能实现
+
+**问题背景**
+- 现有页面重排功能只影响前端视觉顺序（缩略图、翻页导航）
+- 导出PDF时仍按原始页面顺序 (1, 2, 3, ...) 处理，忽略用户调整的页面顺序
+- 用户期望导出的PDF能保持调整后的页面顺序
+
+**技术分析**
+- **客户端导出问题**: `exportPdf()` 函数使用固定循环 `for (let p = 1; p <= pdfDoc.numPages; p++)`
+- **服务端导出问题**: `server/index.js` 使用固定循环 `for (let p = 0; p < numPages; p++)`
+- **关键数据**: `pageOrder` 数组存储用户调整的页面顺序，但导出时未被使用
+
+**解决方案**
+
+1. **客户端导出改进**
+   ```javascript
+   // 改进前：按原始顺序 1, 2, 3...
+   for (let p = 1; p <= pdfDoc.numPages; p++) {
+     const embedded = (await newPdf.copyPages(srcPdf, [p - 1]))[0]
+     // ...
+   }
+   
+   // 改进后：按 pageOrder 顺序
+   const exportOrder = pageOrder.value.length ? pageOrder.value : Array.from({...})
+   for (let i = 0; i < exportOrder.length; i++) {
+     const originalPageNum = exportOrder[i]
+     const embedded = (await newPdf.copyPages(srcPdf, [originalPageNum - 1]))[0]
+     // 注释仍按原始页码存储: annotations.value[originalPageNum]
+   }
+   ```
+
+2. **服务端导出改进**
+   - 前端发送额外的 `pageOrder` 参数
+   - 服务端接收并使用该顺序重新排列页面
+   - 保持注释与原始页码的映射关系
+
+**关键技术点**
+- **页面-注释映射**: 注释存储仍按原始页码 (`annotations[originalPageNum]`)，避免重新组织数据结构
+- **索引转换**: 新PDF中的页面索引 (0-based) vs 原始页码 (1-based) 的正确转换
+- **向下兼容**: 当没有 `pageOrder` 时自动生成原始顺序数组
+- **调试支持**: 添加详细日志显示页面映射关系
+
+**验证结果**
+- 测试案例: 将3页PDF调整为 [3, 1, 2] 顺序
+- 客户端导出: 生成的PDF页面顺序为 第3页→第1页→第2页
+- 服务端导出: 同样按调整后顺序排列
+- 注释正确显示在对应页面，无错位现象
+
+**技术细节**
+- **前端数据流**: `pageOrder` → `exportOrder` → 页面复制循环
+- **后端API扩展**: 新增 `pageOrder` FormData 参数，向下兼容旧调用
+- **错误处理**: 页面顺序数组长度不匹配时回退到原始顺序
+- **性能考虑**: 页面复制顺序改变不影响性能，注释处理逻辑不变
