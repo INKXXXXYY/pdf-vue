@@ -45,7 +45,7 @@ function onChangePage(e: Event) {
 }
 
 // === Annotations (文本/高亮矩形/矩形/遮罩/路径/椭圆/直线/箭头/多边形) ===
-type AnnotationType = 'text' | 'highlight' | 'rect' | 'image' | 'mask' | 'path' | 'ellipse' | 'line' | 'arrow' | 'polygon'
+type AnnotationType = 'text' | 'highlight' | 'rect' | 'image' | 'mask' | 'path' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'underline'
 type Annotation = {
   id: string
   page: number
@@ -74,7 +74,7 @@ type Annotation = {
 }
 const annotations = ref<Record<number, Annotation[]>>({})
 const editingAnnoId = ref<string | null>(null)
-type ToolMode = 'textSelect' | 'replace' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'image' | 'draw' | 'eraser'
+type ToolMode = 'textSelect' | 'replace' | 'select' | 'text' | 'highlight' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'underline' | 'image' | 'draw' | 'eraser'
 const toolMode = ref<ToolMode>('textSelect')
 // 原文替换（基于文本选择）
 const replaceTo = ref('')
@@ -411,6 +411,98 @@ async function renderPage() {
           })
         })
       }
+      // 在下划线模式下：展示可选文本块，并基于真正的文本选择添加下划线
+      if (toolMode.value === 'underline') {
+        const spans = Array.from(textLayerDiv.querySelectorAll('span')) as HTMLSpanElement[]
+        spans.forEach(sp => {
+          sp.style.outline = '1px dashed rgba(59,130,246,0.6)'
+          sp.style.pointerEvents = 'auto'
+        })
+        
+        // 监听选择结束事件
+        const onSelectionEnd = async () => {
+          const selection = window.getSelection()
+          if (!selection || selection.isCollapsed || !pdfDoc || !lastViewport.value) return
+          
+          // 获取选区的实际边界位置
+          const range = selection.getRangeAt(0)
+          const rects = range.getClientRects()
+          if (!rects.length) return
+          
+          const selectedText = selection.toString().trim()
+          if (!selectedText) return
+          
+          console.log('[underline:selection]', { 
+            selectedText,
+            rangeRects: Array.from(rects).map(rect => ({
+              left: rect.left, top: rect.top, width: rect.width, height: rect.height
+            }))
+          })
+          
+          ensurePageArray(pageNum.value)
+          
+          // 获取text-layer的位置信息
+          const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+          if (!textLayer) return
+          
+          const textLayerRect = textLayer.getBoundingClientRect()
+          
+          // 为每个选区矩形添加下划线
+          for (const rect of rects) {
+            // 将客户端坐标转换为相对于text-layer的坐标
+            const relativeLeft = rect.left - textLayerRect.left
+            const relativeTop = rect.top - textLayerRect.top
+            const relativeBottom = relativeTop + rect.height
+            
+            // 转换为viewport坐标
+            const m = getOverlayMetrics()
+            if (!m) continue
+            
+            const vLeft = relativeLeft / m.sx
+            const vBottom = relativeBottom / m.sy
+            const vRight = (relativeLeft + rect.width) / m.sx
+            
+            // 转换为PDF坐标
+            const pLeft = lastViewport.value.convertToPdfPoint(vLeft, vBottom)
+            const pRight = lastViewport.value.convertToPdfPoint(vRight, vBottom)
+            
+            const ux = Math.min(pLeft[0], pRight[0])
+            const uy = Math.max(pLeft[1], pRight[1]) - 1.0
+            const uw = Math.max(1, Math.abs(pRight[0] - pLeft[0]))
+            const uh = 1.5
+            
+            annotations.value[pageNum.value].push({ 
+              id: genId(), 
+              page: pageNum.value, 
+              type: 'underline', 
+              x: ux, 
+              y: uy, 
+              w: uw, 
+              h: uh, 
+              color: strokeColor.value 
+            })
+            
+            console.log('[underline:add]', {
+              selectedText,
+              clientRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+              relativeRect: { left: relativeLeft, top: relativeTop, width: rect.width, height: rect.height },
+              underlinePdf: { x: ux, y: uy, w: uw, h: uh }
+            })
+          }
+          
+          // 清除选择
+          selection.removeAllRanges()
+          
+          snapshot()
+          renderAnnotationsForCurrentPage(null as any)
+          scheduleAutoSave()
+        }
+        
+        // 监听鼠标松开事件，延迟执行以确保选择完成
+        textLayerDiv.addEventListener('mouseup', () => {
+          setTimeout(onSelectionEnd, 50)
+        })
+      }
     }
   } catch {}
   // sync overlays to the actual rendered canvas size on screen
@@ -618,12 +710,53 @@ function getCurrentSelectionSpans(): HTMLSpanElement[] {
   if (!host) return []
   const spans = Array.from(host.querySelectorAll('span')) as HTMLSpanElement[]
   const result: HTMLSpanElement[] = []
-  for (const sp of spans) {
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const r = sel.getRangeAt(i)
-      if (r.intersectsNode(sp)) { result.push(sp); break }
+  
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const range = sel.getRangeAt(i)
+    for (const sp of spans) {
+      // 更精确的检测：检查选区是否实际包含这个span的文本内容
+      try {
+        // 创建一个范围来包含整个span
+        const spanRange = document.createRange()
+        spanRange.selectNodeContents(sp)
+        
+        // 检查选区和span范围是否有实际的重叠
+        // 1. 选区的开始是否在span内
+        // 2. 选区的结束是否在span内  
+        // 3. 选区是否完全包含span
+        // 4. span是否完全包含选区
+        const startInSpan = range.compareBoundaryPoints(Range.START_TO_START, spanRange) >= 0 && 
+                           range.compareBoundaryPoints(Range.START_TO_END, spanRange) <= 0
+        const endInSpan = range.compareBoundaryPoints(Range.END_TO_START, spanRange) >= 0 && 
+                         range.compareBoundaryPoints(Range.END_TO_END, spanRange) <= 0
+        const rangeContainsSpan = range.compareBoundaryPoints(Range.START_TO_START, spanRange) <= 0 && 
+                                 range.compareBoundaryPoints(Range.END_TO_END, spanRange) >= 0
+        const spanContainsRange = spanRange.compareBoundaryPoints(Range.START_TO_START, range) <= 0 && 
+                                 spanRange.compareBoundaryPoints(Range.END_TO_END, range) >= 0
+        
+        if (startInSpan || endInSpan || rangeContainsSpan || spanContainsRange) {
+          if (!result.includes(sp)) {
+            result.push(sp)
+          }
+        }
+        
+        spanRange.detach()
+      } catch (e) {
+        // 如果范围比较失败，回退到原来的方法
+        if (range.intersectsNode(sp) && !result.includes(sp)) {
+          result.push(sp)
+        }
+      }
     }
   }
+  
+  console.log('[getCurrentSelectionSpans]', {
+    selectedText: sel.toString(),
+    totalSpans: spans.length,
+    resultSpans: result.length,
+    resultTexts: result.map(sp => sp.textContent)
+  })
+  
   return result
 }
 
@@ -1320,6 +1453,10 @@ watch(toolMode, (mode) => {
       // 替换模式：需要捕获双击到 span
       textLayer.style.pointerEvents = 'auto'
       textLayer.style.userSelect = 'none'
+    } else if (mode === 'underline') {
+      // 下划线模式：需要支持文本选择来精确添加下划线
+      textLayer.style.pointerEvents = 'auto'
+      textLayer.style.userSelect = 'text'
     } else {
       textLayer.style.pointerEvents = 'none'
       textLayer.style.userSelect = 'none'
@@ -1327,6 +1464,8 @@ watch(toolMode, (mode) => {
   }
   // 进入原文替换模式时，强制重渲，确保文本层带上可编辑装饰
   if (mode === 'replace') {
+    try { renderPage() } catch {}
+  } else if (mode === 'underline') {
     try { renderPage() } catch {}
   }
 })
@@ -1671,6 +1810,17 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       } else if (a.type === 'mask') {
         div.style.border = 'none'
         div.style.background = a.color || '#ffffff'
+      } else if (a.type === 'underline') {
+        const r = pdfRectToViewportRect(a)
+        const line = document.createElement('div')
+        line.style.position = 'absolute'
+        line.style.left = `${r.x}px`
+        line.style.top = `${r.y}px`
+        line.style.width = `${r.w}px`
+        line.style.height = `${Math.max(1, a.h || 2)}px`
+        line.style.background = a.color || strokeColor.value
+        overlay.appendChild(line)
+        continue
       } else if (a.type === 'ellipse') {
         div.style.border = `2px solid ${a.color || '#f59e0b'}`
         div.style.borderRadius = '50%'
@@ -2757,6 +2907,7 @@ function savePageOrderToStorage() {
         <option value="select">编辑选择</option>
         <option value="text">文本</option>
         <option value="highlight">高亮矩形</option>
+        <option value="underline">下划线</option>
         <option value="rect">矩形</option>
         <option value="ellipse">椭圆</option>
         <option value="line">直线</option>

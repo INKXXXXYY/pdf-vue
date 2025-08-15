@@ -211,6 +211,9 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
           // 可选：闭合多边形
           // const first = a.pts[0], last = a.pts[a.pts.length - 1]
           // page.drawLine({ start: { x: last.x, y: last.y }, end: { x: first.x, y: first.y }, thickness: a.strokeWidth || 2, color: rgb(c.r, c.g, c.b) })
+        } else if (a.type === 'underline') {
+          const c = hexToRgb(a.color || '#2563eb')
+          page.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h || 1.5, color: rgb(c.r, c.g, c.b) })
         } else if (a.type === 'image' && a.src) {
           try {
             if (typeof a.src === 'string' && a.src.startsWith('data:')) {
@@ -239,5 +242,3 @@ const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`Server listening on http://0.0.0.0:${PORT}`)
 })
-
-
