@@ -1904,6 +1904,9 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       svg.style.position = 'absolute'
       svg.style.left = '0'
       svg.style.top = '0'
+      svg.style.pointerEvents = 'auto' // 确保SVG可交互
+      svg.setAttribute('class', 'anno path') // 添加anno类名
+      svg.dataset.id = a.id // 设置data-id属性
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
       const d = a.pts.map((p, i) => {
         const v = lastViewport.value!.convertToViewportPoint(p.x, p.y)
@@ -1916,6 +1919,15 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       path.setAttribute('stroke-width', String(a.strokeWidth || 2))
       path.setAttribute('stroke-linecap', 'round')
       path.setAttribute('stroke-linejoin', 'round')
+      // 添加透明的宽路径用于更大的点击区域
+      const invisiblePath = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      invisiblePath.setAttribute('d', d)
+      invisiblePath.setAttribute('fill', 'none')
+      invisiblePath.setAttribute('stroke', 'transparent')
+      invisiblePath.setAttribute('stroke-width', String(Math.max(10, (a.strokeWidth || 2) * 3))) // 更宽的透明点击区域
+      invisiblePath.setAttribute('stroke-linecap', 'round')
+      invisiblePath.setAttribute('stroke-linejoin', 'round')
+      svg.appendChild(invisiblePath) // 先添加透明路径作为点击区域
       svg.appendChild(path)
       // 如果是箭头工具绘制的路径，在终点添加箭头头部（两条短线）
       if ((a as any)._tool === 'arrow' && a.pts.length >= 2) {
@@ -1964,6 +1976,9 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       svg.style.position = 'absolute'
       svg.style.left = '0'
       svg.style.top = '0'
+      svg.style.pointerEvents = 'auto' // 确保SVG可交互
+      svg.setAttribute('class', 'anno polygon') // 添加anno类名
+      svg.dataset.id = a.id // 设置data-id属性
       const pl = document.createElementNS('http://www.w3.org/2000/svg', 'polyline')
       const points = a.pts.map((p) => {
         const v = lastViewport.value!.convertToViewportPoint(p.x, p.y)
