@@ -124,7 +124,7 @@ npm run server
 - 若不希望依赖字体，可改为“中文文本栅格化为图片再嵌入”，请在 issue 中反馈。
 
 版本快照
- - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`
+ - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`、`stable-underline-fix`
  - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`、`snapshot-reorder`
 
 开源许可

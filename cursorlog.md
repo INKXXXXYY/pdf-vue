@@ -231,7 +231,54 @@
 
 2025-08-14 页面重排（Move Up/Move Down）
 
-- 视觉顺序状态 `pageOrder` 存储实际页码数组（1..N），`pageNum` 始终为“实际页码”。
-- 翻页逻辑改为按 `pageOrder` 的邻近项移动；输入框显示/修改“视觉索引（1..N）”。
-- 侧栏缩略图为 `pageOrder` 顺序渲染，并为每个页面提供“上移/下移”，交换 `pageOrder` 后刷新缩略图并持久化到 `localStorage(pdf-pageOrder:<docKey>)`。
+- 视觉顺序状态 `pageOrder` 存储实际页码数组（1..N），`pageNum` 始终为"实际页码"。
+- 翻页逻辑改为按 `pageOrder` 的邻近项移动；输入框显示/修改"视觉索引（1..N）"。
+- 侧栏缩略图为 `pageOrder` 顺序渲染，并为每个页面提供"上移/下移"，交换 `pageOrder` 后刷新缩略图并持久化到 `localStorage(pdf-pageOrder:<docKey>)`。
 - 注意：本地仅改变前端视觉顺序，不改变源 PDF 内部页序；导出仍按原始页序逐页扁平化。若需导出后的 PDF 也变更页序，需要服务端或客户端在导出阶段按 `pageOrder` 重排页面（后续可选实现）。
+
+2025-XX-XX 下划线功能精确定位重构
+
+**问题背景**
+- 原有下划线功能存在定位不准确问题：用户选择"Tracking"文本，但下划线出现在"Time Location"位置
+- 根本原因：基于文本跨度（span）检测的方法不够精确，PDF文本项可能包含多个词汇作为一个整体
+
+**技术分析**
+- PDF文本层结构：`textContent.items` 可能将多个词汇（如"time Location Tracking"）作为单个文本项
+- 原方法：使用 `getCurrentSelectionSpans()` 函数通过 `Range.intersectsNode()` 检测选区与文本跨度的交集
+- 问题：即使用户只选择部分文本，整个包含的文本跨度都会被认为选中
+
+**解决方案**
+1. **重构选区检测机制**
+   - 摒弃基于文本跨度推测的方法
+   - 改用 `Range.getClientRects()` 直接获取选区的精确像素边界
+   - 为每个选区矩形单独创建下划线段
+
+2. **实现精确坐标转换链**
+   ```javascript
+   // 客户端坐标 → text-layer相对坐标 → viewport坐标 → PDF坐标
+   const relativeLeft = rect.left - textLayerRect.left
+   const vLeft = relativeLeft / m.sx
+   const pLeft = lastViewport.value.convertToPdfPoint(vLeft, vBottom)
+   ```
+
+3. **关键代码改进**
+   - 移除 `getCurrentSelectionSpans()` 依赖
+   - 直接使用 `selection.getRangeAt(0).getClientRects()`
+   - 支持多矩形选区（跨行选择、复杂选择形状）
+
+**技术要点**
+- **坐标系转换**: 处理三个不同坐标系之间的转换（客户端、text-layer、PDF）
+- **缩放适配**: 通过 `getOverlayMetrics()` 获取缩放比例进行坐标校正
+- **边界处理**: 使用 `Math.min/max` 确保下划线方向一致性
+- **事件时序**: 使用 `setTimeout(onSelectionEnd, 50)` 确保选择操作完成
+
+**验证结果**
+- 测试案例：选择"App Features"中的"Tracking"部分
+- 改进前：下划线出现在"Time Location"位置
+- 改进后：下划线精确出现在"Tracking"正下方
+- 支持任意部分文本选择，不受PDF文本项分组影响
+
+**文档和版本管理**
+- 更新README.md：添加下划线功能说明和使用方法
+- 创建稳定标签：`stable-underline-fix`
+- 提交信息：`feat: 重构下划线功能，实现精确文本选择定位`

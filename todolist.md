@@ -92,6 +92,7 @@
   - [x] 创建可回退快照：`snapshot-eaea063`、`stable-eaea063`（对齐文本坐标阶段）。
   - [x] 创建可回退快照：`snapshot-6134fe5`、`stable-6134fe5`（清空重做与拖动并发渲染修复）。
   - [x] 创建可回退快照：`snapshot-5f18acd`、`stable-5f18acd`（文本选择与编辑选择拆分、编辑 UX 修复）。
+  - [x] 创建可回退快照：`stable-underline-fix`（下划线功能精确定位重构）。
 
 ## 最近完成的功能 (Recent Completions)
 
