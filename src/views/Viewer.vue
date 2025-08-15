@@ -1049,16 +1049,24 @@ function onImportJsonFile(e: Event) {
 async function exportPdf() {
   if (!pdfDoc) return alert('请先加载 PDF 文件')
   if (!originalPdfBytes) return alert('无法获取源 PDF 字节，无法导出。请通过上传或 URL 方式加载。')
-  // 逐页将注释层扁平化到新 PDF
+  // 逐页将注释层扁平化到新 PDF，按用户调整的页面顺序
   const newPdf = await PDFDocument.create()
   const srcPdf = await PDFDocument.load(originalPdfBytes)
   const helv = await newPdf.embedFont(StandardFonts.Helvetica)
-  for (let p = 1; p <= pdfDoc.numPages; p++) {
-    // 将原始页面嵌入
-    const embedded = (await newPdf.copyPages(srcPdf, [p - 1]))[0]
+  
+  // 使用 pageOrder 确定导出顺序，如果没有则使用原始顺序
+  const exportOrder = pageOrder.value.length ? pageOrder.value : Array.from({ length: pdfDoc.numPages }, (_, i) => i + 1)
+  console.log('[export] 页面导出顺序:', exportOrder)
+  
+  for (let i = 0; i < exportOrder.length; i++) {
+    const originalPageNum = exportOrder[i] // 原始页码 (1-based)
+    console.log(`[export] 导出第 ${i + 1} 页，来源: 原始第 ${originalPageNum} 页`)
+    
+    // 将原始页面嵌入到新位置
+    const embedded = (await newPdf.copyPages(srcPdf, [originalPageNum - 1]))[0]
     newPdf.addPage(embedded)
-    const target = newPdf.getPage(p - 1)
-    const list = annotations.value[p] || []
+    const target = newPdf.getPage(i) // 新PDF中的页面索引 (0-based)
+    const list = annotations.value[originalPageNum] || [] // 注释仍然按原始页码存储
     // 渲染注释到该页
     for (const a of list) {
       if (a.type === 'text') {
@@ -1384,7 +1392,17 @@ async function exportPdfServer() {
   } else {
     return alert('缺少源 PDF 数据，无法服务端导出')
   }
-  form.append('annotations', JSON.stringify(annotations.value))
+  
+  // 包含注释和页面顺序信息
+  const exportData = {
+    annotations: annotations.value,
+    pageOrder: pageOrder.value.length ? pageOrder.value : Array.from({ length: numPages.value }, (_, i) => i + 1)
+  }
+  console.log('[exportServer] 发送页面顺序:', exportData.pageOrder)
+  
+  form.append('annotations', JSON.stringify(exportData.annotations))
+  form.append('pageOrder', JSON.stringify(exportData.pageOrder))
+  
   const resp = await fetch('/api/annotate/flatten', { method: 'POST', body: form })
   if (!resp.ok) {
     const txt = await resp.text()
@@ -2868,6 +2886,25 @@ function savePageOrderToStorage() {
     localStorage.setItem('pdf-pageOrder:' + currentDocKey, JSON.stringify(pageOrder.value))
   } catch {}
 }
+
+// 测试页面重排导出功能
+function testPageReorderExport() {
+  if (!pdfDoc) {
+    alert('请先加载PDF文件')
+    return
+  }
+  
+  const currentOrder = pageOrder.value.length ? pageOrder.value : Array.from({ length: numPages.value }, (_, i) => i + 1)
+  const message = `当前页面顺序: ${currentOrder.join(', ')}\n\n导出的PDF将按此顺序排列页面。\n\n要测试重排功能：\n1. 使用侧栏的"上移/下移"按钮调整页面顺序\n2. 点击"导出PDF"或"服务端导出"查看结果`
+  
+  console.log('[testPageReorder]', {
+    originalOrder: Array.from({ length: numPages.value }, (_, i) => i + 1),
+    currentOrder: currentOrder,
+    isReordered: JSON.stringify(currentOrder) !== JSON.stringify(Array.from({ length: numPages.value }, (_, i) => i + 1))
+  })
+  
+  alert(message)
+}
 </script>
 
 <template>
@@ -2935,6 +2972,7 @@ function savePageOrderToStorage() {
       <input id="img-file" type="file" accept="image/*" style="display:none" @change="onPickImageFile" />
       <button @click="triggerPickImage">添加图片</button>
       <button @click="exportPdfServer">服务端导出</button>
+      <button @click="testPageReorderExport" style="background:#10b981;color:white">测试页面重排</button>
       <button @click="saveAnnotationsJson">导出JSON</button>
       <button @click="triggerImportJson">导入JSON</button>
       <input id="import-json" type="file" accept="application/json" style="display:none" @change="onImportJsonFile" />

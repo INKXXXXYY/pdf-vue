@@ -90,6 +90,11 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
   try {
     const annotationsJson = req.body.annotations || '{}'
     const annotations = JSON.parse(annotationsJson)
+    const pageOrderJson = req.body.pageOrder || '[]'
+    const pageOrder = JSON.parse(pageOrderJson)
+    console.log('[server] Received annotations for', Object.keys(annotations).length, 'pages')
+    console.log('[server] Page reorder:', pageOrder.length ? pageOrder : 'none (original order)')
+    
     let srcBytes = null
     if (req.file && req.file.buffer) {
       srcBytes = req.file.buffer
@@ -122,11 +127,23 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
     }
 
     const numPages = srcPdf.getPageCount()
-    for (let p = 0; p < numPages; p++) {
-      const embedded = (await outPdf.copyPages(srcPdf, [p]))[0]
+    
+    // 确定导出顺序：如果有页面顺序则使用，否则使用原始顺序
+    const exportOrder = pageOrder.length === numPages 
+      ? pageOrder 
+      : Array.from({ length: numPages }, (_, i) => i + 1)
+    
+    console.log('[server] Export order:', exportOrder)
+    
+    for (let i = 0; i < exportOrder.length; i++) {
+      const originalPageNum = exportOrder[i] // 原始页码 (1-based)
+      console.log(`[server] Processing page ${i + 1}, source: original page ${originalPageNum}`)
+      
+      // 将原始页面嵌入到新位置
+      const embedded = (await outPdf.copyPages(srcPdf, [originalPageNum - 1]))[0]
       outPdf.addPage(embedded)
-      const page = outPdf.getPage(p)
-      const list = annotations[p + 1] || []
+      const page = outPdf.getPage(i) // 新PDF中的页面索引 (0-based)
+      const list = annotations[originalPageNum] || [] // 注释仍然按原始页码存储
       for (const a of list) {
         if (a.type === 'text') {
           const size = a.fontSize || 14
