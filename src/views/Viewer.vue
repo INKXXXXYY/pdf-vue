@@ -1399,15 +1399,9 @@ async function exportPdfServer() {
     pageOrder: pageOrder.value.length ? pageOrder.value : Array.from({ length: numPages.value }, (_, i) => i + 1)
   }
   console.log('[exportServer] 发送页面顺序:', exportData.pageOrder)
-  console.log('[exportServer] === FormData Debug ===')
   
   form.append('annotations', JSON.stringify(exportData.annotations))
   form.append('pageOrder', JSON.stringify(exportData.pageOrder))
-  
-  // 调试：打印FormData内容
-  for (let [key, value] of form.entries()) {
-    console.log(`[exportServer] FormData[${key}]:`, typeof value === 'string' ? value.substring(0, 100) + (value.length > 100 ? '...' : '') : value)
-  }
   
   const resp = await fetch('/api/annotate/flatten', { method: 'POST', body: form })
   if (!resp.ok) {
