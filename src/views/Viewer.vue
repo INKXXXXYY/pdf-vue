@@ -524,17 +524,23 @@ async function renderPage() {
     anno.style.height = `${rect.height}px`
     anno.style.left = `0px`
     anno.style.top = `0px`
-    // 在文本选择工具下，允许穿透空白区域到文本层，实现原生文本选择
+    // 根据当前工具模式设置overlay样式
     if (toolMode.value === 'textSelect') {
-      // 只让注释元素可点，空白穿透
-      anno.style.pointerEvents = 'auto'
-      ;(anno.style as any).setProperty('--anno-events', 'auto')
-      // 给注释元素统一 class 以控制命中区域
-      // 已有 .anno 元素设置 pointer-events: auto
+      // 文本选择：overlay 空白穿透，注释元素依然可交互
+      anno.style.pointerEvents = 'none'
       anno.style.cursor = 'text'
-    } else {
+    } else if (toolMode.value === 'replace') {
+      // 替换：overlay 空白穿透
+      anno.style.pointerEvents = 'none'
+      anno.style.cursor = 'text'
+    } else if (toolMode.value === 'select') {
+      // 编辑选择：overlay 接管事件
       anno.style.pointerEvents = 'auto'
-      anno.style.cursor = 'crosshair'
+      anno.style.cursor = 'default'
+    } else {
+      // 其他工具：overlay 接管事件
+      anno.style.pointerEvents = 'auto'
+      anno.style.cursor = (toolMode.value === 'eraser' ? 'none' : 'crosshair')
     }
   }
   await renderHighlightsForCurrentPage(page)
@@ -1459,10 +1465,18 @@ watch(toolMode, (mode) => {
       anno.style.pointerEvents = 'none'
       anno.style.cursor = 'text'
       if (textLayer) { textLayer.style.pointerEvents = 'auto'; textLayer.style.userSelect = 'none' }
+    } else if (mode === 'select') {
+      // 编辑选择：overlay 接管事件，确保注释元素可交互
+      anno.style.pointerEvents = 'auto'
+      anno.style.cursor = 'default'
+      anno.classList.remove('eraser')
+      // 确保注释元素及其控制元素可交互
+      const nodes = anno.querySelectorAll<HTMLElement>('.anno, .resize-h, .del-btn')
+      nodes.forEach(n => n.style.pointerEvents = 'auto')
     } else {
       // 其他工具：overlay 接管事件
       anno.style.pointerEvents = 'auto'
-      anno.style.cursor = (mode === 'select') ? 'default' : (mode === 'eraser' ? 'none' : 'crosshair')
+      anno.style.cursor = (mode === 'eraser' ? 'none' : 'crosshair')
       if (mode === 'eraser') anno.classList.add('eraser'); else anno.classList.remove('eraser')
     }
   }
@@ -1726,6 +1740,7 @@ async function renderAnnotationsForCurrentPage(_page: any) {
     div.className = `anno ${a.type}`
     div.dataset.id = a.id
     div.style.position = 'absolute'
+    div.style.pointerEvents = 'auto' // 确保注释元素可交互
       if (a.type === 'image') {
       const r = pdfRectToViewportRect(a)
       const img = document.createElement('img')
