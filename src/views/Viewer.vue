@@ -101,6 +101,10 @@ let saveTimer: any = null
 let currentDocKey: string | null = null
 // 编辑模式：绘制/编辑图形时才锁定，文本选择与编辑选择均视为非编辑
 const isEditingMode = computed(() => !['select', 'replace', 'textSelect'].includes(toolMode.value))
+// 是否有选中的注释
+const hasSelectedAnnotations = computed(() => {
+  return selectedAnnoIds.value.length > 0 || (selectedAnnoId.value !== null)
+})
 // const lockFitPage = ref(false)
 let lastMoveLogTs = 0
  let lastOverlayPoint: { x: number; y: number } | null = null
@@ -2843,21 +2847,31 @@ function autoResizeTextarea(el: HTMLTextAreaElement) {
   el.style.height = `${line}px`
 }
 
+// 删除选中的注释（可由按钮或键盘触发）
+function deleteSelectedAnnotations() {
+  const ids = selectedAnnoIds.value.length ? selectedAnnoIds.value : (selectedAnnoId.value ? [selectedAnnoId.value] : [])
+  if (!ids.length) return
+  
+  const list = annotations.value[pageNum.value] || []
+  snapshot()
+  
+  ids.forEach(id => {
+    const idx = list.findIndex(i => i.id === id)
+    if (idx >= 0) list.splice(idx, 1)
+  })
+  
+  selectedAnnoIds.value = []
+  selectedAnnoId.value = null
+  renderAnnotationsForCurrentPage(null as any)
+  scheduleAutoSave()
+  
+  console.log('[delete] 删除了', ids.length, '个注释:', ids)
+}
+
 function onKeyDownGlobal(e: KeyboardEvent) {
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    const ids = selectedAnnoIds.value.length ? selectedAnnoIds.value : (selectedAnnoId.value ? [selectedAnnoId.value] : [])
-    if (!ids.length) return
-    const list = annotations.value[pageNum.value] || []
     e.preventDefault()
-    snapshot()
-    ids.forEach(id => {
-      const idx = list.findIndex(i => i.id === id)
-      if (idx >= 0) list.splice(idx, 1)
-    })
-    selectedAnnoIds.value = []
-    selectedAnnoId.value = null
-    renderAnnotationsForCurrentPage(null as any)
-    scheduleAutoSave()
+    deleteSelectedAnnotations()
   }
 }
 
@@ -2959,6 +2973,14 @@ function testPageReorderExport() {
       <template v-if="toolMode==='eraser'">
         <label>半径</label>
         <input style="width:60px" type="number" min="6" max="48" v-model.number="eraserRadius" title="橡皮擦半径(px)" />
+      </template>
+      <template v-if="toolMode==='select'">
+        <button 
+          @click="deleteSelectedAnnotations" 
+          :disabled="!hasSelectedAnnotations"
+          title="删除选中的注释">
+          删除选中
+        </button>
       </template>
       
       <input type="color" v-model="strokeColor" title="颜色" />

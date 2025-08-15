@@ -3,7 +3,7 @@
 功能概览
 - PDF 预览、分页、缩放、旋转、缩略图与书签
 - 搜索与页内高亮
-- 注释：文本/高亮矩形/矩形/下划线，编辑选择拖动/删除，撤销/重做
+- 注释：文本/高亮矩形/矩形/下划线，编辑选择拖动/删除（工具栏按钮），撤销/重做
 - 图片注释：插入/删除/拖动/缩放/旋转；把手随缩放同步，底边把手仅调整底边（已修复）
 - 注释持久化（localStorage）、JSON 导入/导出
 - 客户端导出：将注释扁平化到新 PDF（pdf-lib）
@@ -98,6 +98,14 @@ npm run dev
 - 松开鼠标后，下划线会自动添加到选中文本的正下方
 - 下划线位置完全基于实际选择边界，不受PDF文本项分组影响
 
+编辑选择与删除功能使用说明
+- **选择注释**：在工具下拉里选择"编辑选择"，点击任何注释进行选择
+- **多选注释**：按住Shift键点击可同时选择多个注释
+- **删除选中**：选中注释后，工具栏会出现"删除选中"按钮，点击即可删除
+- **键盘快捷键**：也可使用Delete或Backspace键删除选中的注释
+- **拖拽移动**：选中的注释可以直接拖拽移动位置
+- **调整大小**：选中矩形类注释时会显示缩放把手，可调整尺寸
+
 页面重排与导出说明
 - **调整页面顺序**：在侧栏缩略图下方使用"上移/下移"按钮调整页面顺序
 - **导出重排页面**：
@@ -137,8 +145,8 @@ npm run server
 - 若不希望依赖字体，可改为“中文文本栅格化为图片再嵌入”，请在 issue 中反馈。
 
 版本快照
- - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`、`stable-underline-fix`
- - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`、`snapshot-reorder`
+ - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`、`stable-underline-fix`、`stable-reorder-export-v2`
+ - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`、`snapshot-reorder`、`snapshot-e043e4b`、`snapshot-9bc3544`
 
 开源许可
 - 本项目建议使用 MIT 许可证（LICENSE 文件）。
