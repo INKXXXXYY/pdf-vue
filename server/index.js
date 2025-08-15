@@ -88,11 +88,20 @@ async function tryLoadCjkFontBytes() {
 
 app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
   try {
+    // 详细调试信息
+    console.log('[server] === Request Debug Info ===')
+    console.log('[server] Content-Type:', req.headers['content-type'])
+    console.log('[server] Body keys:', Object.keys(req.body))
+    console.log('[server] Body content:', req.body)
+    console.log('[server] File info:', req.file ? `${req.file.fieldname}, ${req.file.size} bytes` : 'no file')
+    
     const annotationsJson = req.body.annotations || '{}'
     const annotations = JSON.parse(annotationsJson)
     const pageOrderJson = req.body.pageOrder || '[]'
     const pageOrder = JSON.parse(pageOrderJson)
     console.log('[server] Received annotations for', Object.keys(annotations).length, 'pages')
+    console.log('[server] Raw pageOrder JSON:', pageOrderJson)
+    console.log('[server] Parsed pageOrder:', pageOrder)
     console.log('[server] Page reorder:', pageOrder.length ? pageOrder : 'none (original order)')
     
     let srcBytes = null
@@ -128,10 +137,12 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
 
     const numPages = srcPdf.getPageCount()
     
-    // 确定导出顺序：如果有页面顺序则使用，否则使用原始顺序
-    const exportOrder = pageOrder.length === numPages 
+    // 确定导出顺序：如果有有效页面顺序则使用，否则使用原始顺序
+    const exportOrder = (pageOrder.length > 0 && pageOrder.length === numPages)
       ? pageOrder 
       : Array.from({ length: numPages }, (_, i) => i + 1)
+    
+    console.log('[server] pageOrder.length:', pageOrder.length, 'numPages:', numPages, 'using pageOrder:', pageOrder.length > 0 && pageOrder.length === numPages)
     
     console.log('[server] Export order:', exportOrder)
     
