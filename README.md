@@ -145,8 +145,29 @@ npm run server
 - 若不希望依赖字体，可改为“中文文本栅格化为图片再嵌入”，请在 issue 中反馈。
 
 版本快照
- - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`、`stable-underline-fix`、`stable-reorder-export-v2`
+ - 稳定标签：`stable-5f18acd`、`stable-arrow-head`、`stable-eraser`、`stable-reorder`、`stable-underline-fix`、`stable-reorder-export-v2`、`stable-v1.1.0`
  - 快照分支：`snapshot-5f18acd`、`snapshot-arrow-head`、`snapshot-eraser`、`snapshot-reorder`、`snapshot-e043e4b`、`snapshot-9bc3544`
+
+## 当前版本 v1.1.0 重要说明
+
+### 已修复功能
+- ✅ **原文替换功能优化**：修复了双击编辑时失去焦点的问题，编辑框尺寸现在与原红框一致
+- ✅ **下划线功能修复**：解决了编辑其他元素后无法选中文本添加下划线的问题
+- ✅ **图片导出修复**：修复了添加图片后导出PDF看不到图片的问题，现在图片可以正常导出
+- ✅ **编辑后红框保持**：修复了编辑文本后其他红框消失的问题，现在会保持显示以提示可继续编辑
+
+### 已知限制
+⚠️ **文本span偏移问题**：
+- 在使用原文替换、下划线、文本选择等功能时，可能出现span元素位置偏移的情况
+- 这个问题与PDF文本层的复杂布局和坐标转换有关
+- 目前暂时没有找到完美的解决方法，但不影响基本功能使用
+- 如果遇到明显的位置偏移，可以尝试刷新页面重新加载PDF
+
+### 功能稳定性
+- 所有核心功能（注释、导出、编辑等）均已测试稳定
+- 图片添加和导出功能已完全修复
+- 原文替换和下划线功能的用户体验得到显著改善
+- 建议在生产环境中使用此版本
 
 开源许可
 - 本项目建议使用 MIT 许可证（LICENSE 文件）。

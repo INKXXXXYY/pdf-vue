@@ -234,13 +234,31 @@ app.post('/api/annotate/flatten', upload.single('file'), async (req, res) => {
         } else if (a.type === 'image' && a.src) {
           try {
             if (typeof a.src === 'string' && a.src.startsWith('data:')) {
+              console.log('[server:image] processing image', {
+                id: a.id,
+                srcFormat: a.src.substring(0, 30) + '...',
+                position: { x: a.x, y: a.y },
+                size: { w: a.w, h: a.h }
+              })
               const base64 = a.src.split(',')[1] || ''
               const bytes = Buffer.from(base64, 'base64')
+              console.log('[server:image] converted to bytes, length:', bytes.length)
               let img
-              try { img = await outPdf.embedPng(bytes) } catch { img = await outPdf.embedJpg(bytes) }
+              try { 
+                img = await outPdf.embedPng(bytes) 
+                console.log('[server:image] embedded as PNG')
+              } catch { 
+                img = await outPdf.embedJpg(bytes) 
+                console.log('[server:image] embedded as JPG')
+              }
               page.drawImage(img, { x: a.x, y: a.y, width: a.w, height: a.h })
+              console.log('[server:image] successfully drawn to PDF')
+            } else {
+              console.warn('[server:image] skipping image - not data URL format:', typeof a.src, a.src ? a.src.substring(0, 20) : 'null')
             }
-          } catch {}
+          } catch (e) {
+            console.error('[server:image] failed to process image:', e.message)
+          }
         }
       }
     }

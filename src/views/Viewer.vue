@@ -100,7 +100,7 @@ const autoSaveEnabled = ref(true)
 let saveTimer: any = null
 let currentDocKey: string | null = null
 // 编辑模式：绘制/编辑图形时才锁定，文本选择与编辑选择均视为非编辑
-const isEditingMode = computed(() => !['select', 'replace', 'textSelect'].includes(toolMode.value))
+const isEditingMode = computed(() => !['select', 'replace', 'textSelect', 'text'].includes(toolMode.value))
 // 是否有选中的注释
 const hasSelectedAnnotations = computed(() => {
   return selectedAnnoIds.value.length > 0 || (selectedAnnoId.value !== null)
@@ -112,7 +112,7 @@ let lastMoveLogTs = 0
  let lastPdfPoint: { x: number; y: number } | null = null
 const selectedAnnoId = ref<string | null>(null)
 const selectedAnnoIds = ref<string[]>([])
-let draggingOriginsById: Record<string, { x: number; y: number }> = {}
+let draggingOriginsById: Record<string, { x: number; y: number; pts?: Array<{ x: number; y: number }> }> = {}
 let isBoxSelecting = false
 let boxSelectStart: { x: number; y: number } | null = null
 let resizingHandle: 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w' | null = null
@@ -161,7 +161,8 @@ function undo() {
   const cur = JSON.stringify(annotations.value)
   redoStack.value.push(cur)
   annotations.value = JSON.parse(prev)
-  renderPage()
+  // 只重新渲染注释层，不重新渲染PDF，保持当前缩放比例
+  renderAnnotationsForCurrentPage(null as any)
   scheduleAutoSave()
 }
 // 保留原重做逻辑备用（未在 UI 暴露）
@@ -171,7 +172,8 @@ function undo() {
   const cur = JSON.stringify(annotations.value)
   undoStack.value.push(cur)
   annotations.value = JSON.parse(next)
-  renderPage()
+  // 只重新渲染注释层，不重新渲染PDF，保持当前缩放比例
+  renderAnnotationsForCurrentPage(null as any)
 } */
 
 async function loadPdf(urlOrData: string | ArrayBuffer) {
@@ -306,24 +308,69 @@ async function renderPage() {
         if (!s) continue
         const t = it.transform as number[]
         const combined = multiply(vp, t)
-        // 将 PDF 文本宽高换算为视口像素：沿用搜索高亮的计算方式
-        const w = typeof it.width === 'number' ? it.width * (scale.value / (t[0] || 1)) : Math.max(5, s.length * 5)
+        // 将 PDF 文本宽高换算为视口像素：使用精确的宽度计算
+        let w = typeof it.width === 'number' ? it.width * (scale.value / (t[0] || 1)) : Math.max(15, s.length * 12)
+        // 计算实际字体大小
+        const pdfFontSize = Math.abs(t?.[0] || 12) // 从transform矩阵获取字体大小
+        const fontCssPx = Math.max(10, Math.min(16, pdfFontSize)) // 限制在10-16px之间
+        
+        // 调试字体大小（只对某些文本输出，避免过多日志）
+        if (s.length > 10 && s.includes('connected')) {
+          console.log('[textLayer:fontSize]', {
+            text: s.substring(0, 20) + '...',
+            pdfFontSize: pdfFontSize,
+            finalFontSize: fontCssPx,
+            transform: t
+          })
+        }
+        
+        // 使用更精确的宽度计算方法
+        // 优先使用实际测量的文本宽度，而不是PDF计算的宽度
+        
+        // 创建临时测量元素来获取实际文本宽度
+        const tempSpan = document.createElement('span')
+        tempSpan.style.position = 'absolute'
+        tempSpan.style.visibility = 'hidden'
+        tempSpan.style.fontSize = `${fontCssPx}px`
+        tempSpan.style.fontFamily = 'Helvetica, Arial, sans-serif'
+        tempSpan.style.whiteSpace = 'nowrap'
+        tempSpan.style.lineHeight = `${fontCssPx}px`
+        
+        // 检测可能的粗体文本（标题、关键词等）
+        const mightBeBold = s.toLowerCase().includes('core app') || s.toLowerCase().includes('features') || 
+                           s.toLowerCase().includes('key user') || s.toLowerCase().includes('flow') ||
+                           (s.length < 20 && /^[A-Z]/.test(s)) || 
+                           /^[A-Z][a-z]+ [A-Z][a-z]+/.test(s) // 标题格式：如 "Core App"
+        tempSpan.style.fontWeight = mightBeBold ? 'bold' : 'normal'
+        
+        tempSpan.textContent = s
+        document.body.appendChild(tempSpan)
+        const measuredWidth = tempSpan.getBoundingClientRect().width
+        document.body.removeChild(tempSpan)
+        
+        // 使用测量宽度加上小量缓冲，不再参考PDF原始宽度
+        w = Math.max(measuredWidth + 1, s.length * 4) // 只加1像素缓冲，最小保证每字符4像素
         const h = typeof it.height === 'number' ? Math.abs(it.height) : Math.abs(t?.[3] || 10)
         const r = rectFromTransform(combined, w, h)
         const span = document.createElement('span')
         span.style.position = 'absolute'
-        // 不设置固定宽高，避免整块；控制较小的可选中高亮高度
-        span.style.whiteSpace = 'pre'
+        // 不设置固定宽高，允许内容自然流动；改为 nowrap 确保文本不换行
+        span.style.whiteSpace = 'nowrap'
         span.style.display = 'inline-block'
-        // 使用固定较小的视觉字号/行高，避免选区高度过大
-        const fontCssPx = 12
-        span.style.left = `${r.x}px`
+        // fontCssPx 已在上面计算过了
+        // 向右微调大约1个字符的距离，改善对齐
+        const charWidth = fontCssPx * 0.2 // 估算字符宽度
+        const rightOffset = charWidth * 0 // 向右偏移0个字符的距离
+        span.style.left = `${r.x + rightOffset}px`
         // 许多 PDF 文本矩形的 y 为块的底边；将高亮条顶部放在 (y + h - 行高)
         span.style.top = `${r.y + Math.max(0, r.h - fontCssPx)}px`
         span.style.fontSize = `${fontCssPx}px`
         span.style.lineHeight = `${fontCssPx}px`
         span.style.height = `${fontCssPx}px`
-        span.style.overflow = 'hidden'
+        // 设置span宽度，使用精确测量的宽度
+        span.style.minWidth = `${w}px`
+        span.style.width = `${w}px`
+        span.style.maxWidth = 'none'
         span.style.color = 'transparent'
         ;(span.style as any)["-webkit-text-fill-color"] = 'transparent'
         span.style.caretColor = 'transparent'
@@ -336,21 +383,87 @@ async function renderPage() {
         span.dataset.h = String(r.h)
         // 记录可视行高（overlay 像素），用于替换时估算字号
         span.dataset.vhcss = String(fontCssPx * tlScaleY)
+        // 添加调试信息：记录计算出的宽度和实际文本
+        span.dataset.calculatedW = String(w)
+        span.dataset.textLength = String(s.length)
+        span.dataset.measuredWidth = String(measuredWidth)
+        span.dataset.rightOffset = String(rightOffset)
+        span.dataset.originalX = String(r.x)
+        // 调试：对所有文本添加调试信息，特别关注可能的文本片段
+        if (s.length > 5) {  // 降低阈值以看到更多文本片段
+          span.title = `Text: "${s}" | Len: ${s.length} | CalcW: ${w.toFixed(1)} | MeasuredW: ${measuredWidth.toFixed(1)}px`
+          // 特别标记包含关键词的文本片段
+          // if (s.toLowerCase().includes('connect') || s.toLowerCase().includes('family') || s.toLowerCase().includes('location') || s.toLowerCase().includes('features') || s.toLowerCase().includes('core app')) {
+          //   console.log('[textLayer:keywordText]', {
+          //     text: s,
+          //     length: s.length,
+          //     calculatedWidth: w,
+          //     rectWidth: r.w,
+          //     measuredWidth: measuredWidth,
+          //     position: { originalX: r.x, adjustedX: r.x + rightOffset, y: r.y },
+          //     rightOffset: rightOffset,
+          //     hasKeyword: true
+          //   })
+          // }
+          // 特别标记问题文本片段（仅用于调试）
+          // if (s.toLowerCase().includes('stay') || s.toLowerCase().includes('through') || s.toLowerCase().includes('real-time') || s.toLowerCase().includes('sharing')) {
+          //   console.log('[textLayer:problemText]', {
+          //     text: s,
+          //     length: s.length,
+          //     position: { originalX: r.x, adjustedX: r.x + rightOffset, y: r.y },
+          //     measuredWidth: measuredWidth,
+          //     calculatedWidth: w,
+          //     rightOffset: rightOffset,
+          //     isProblemFragment: true
+          //   })
+          //   // 添加淡红色背景以便识别
+          //   span.style.background = 'rgba(255, 0, 0, 0.1)'
+          // }
+        }
         textLayerDiv.appendChild(span)
         count++
       }
       console.log('[textLayer] manual layer built; spans:', count)
-      // 在原文替换模式下：给文本项增加可视边框与双击替换入口
-      if (toolMode.value === 'replace') {
-        const spans = Array.from(textLayerDiv.querySelectorAll('span')) as HTMLSpanElement[]
+      
+      // 尝试合并相邻的文本span以解决选择截断问题
+      try {
+        // 先输出详细的定位信息
+        // debugTextPositioning(textLayerDiv)
+        mergeAdjacentTextSpans(textLayerDiv)
+      } catch (e) {
+        console.warn('[textLayer] merge adjacent spans failed:', e)
+      }
+      
+      // 文本层重建后，重新应用当前工具模式的样式
+      // 这样可以确保原文替换、下划线等模式的红框不会消失
+      nextTick(() => {
+        if (textLayerDiv) {
+          // 清除当前模式标记，强制重新应用工具模式样式
+          ;(textLayerDiv as any)._currentMode = null
+          
+          // 手动触发工具模式的watch回调来重新应用样式
+          const currentMode = toolMode.value
+          if (currentMode === 'replace' || currentMode === 'underline') {
+            console.log('[textLayer:rebuild] reapplying', currentMode, 'mode styles')
+            // 直接触发工具模式的重新应用
+            toolMode.value = currentMode
+          }
+        }
+      })
+      
+      // 保留原有的替换模式逻辑作为备用（现在已经通过上面的逻辑处理）
+      if (false && toolMode.value === 'replace' && textLayerDiv) {
+        const spans = Array.from(textLayerDiv!.querySelectorAll('span')) as HTMLSpanElement[]
         spans.forEach(sp => {
           sp.style.outline = '1px dashed rgba(239,68,68,0.9)'
           sp.style.background = (sp.style.background && sp.style.background !== 'transparent') ? sp.style.background : 'transparent'
           sp.style.pointerEvents = 'auto'
           sp.title = '双击替换此处文本'
-          sp.addEventListener('mouseenter', () => { sp.style.background = 'rgba(239,68,68,0.08)' })
-          sp.addEventListener('mouseleave', () => { sp.style.background = 'transparent' })
-          sp.addEventListener('dblclick', (ev) => {
+          
+          // 创建事件处理函数
+          const mouseEnterHandler = () => { sp.style.background = 'rgba(239,68,68,0.08)' }
+          const mouseLeaveHandler = () => { sp.style.background = 'transparent' }
+          const dblClickHandler = (ev: Event) => {
             ev.stopPropagation()
             const vx = parseFloat(sp.dataset.x || '0')
             const vy = parseFloat(sp.dataset.y || '0')
@@ -410,103 +523,28 @@ async function renderPage() {
             const textY = Math.max(pdfTextTop[1], pdfTextBottom[1])
             annotations.value[pageNum.value].push({ id, page: pageNum.value, type: 'text', x: textX, y: textY, w: 0, h: 0, text: sp.textContent || '', color: textColor.value, fontSize: fs, vx: round3(ovTop.x), vy: round3(ovTop.y), _scale: scale.value, _rotation: rotation.value, _ow: cssW, _oh: cssH })
             snapshot()
+            // 隐藏被双击的原文 span，避免与遮罩+新文本重叠
+            sp.style.opacity = '0'
+            sp.style.pointerEvents = 'none'
+            // 保存被隐藏的 span 引用到新文本注释上，便于后续恢复
+            const newTextAnno = annotations.value[pageNum.value][annotations.value[pageNum.value].length - 1]
+            ;(newTextAnno as any)._hiddenSpan = sp
             editingAnnoId.value = id
             renderPage().then(() => openTextEditor(id))
-          })
-        })
-      }
-      // 在下划线模式下：展示可选文本块，并基于真正的文本选择添加下划线
-      if (toolMode.value === 'underline') {
-        const spans = Array.from(textLayerDiv.querySelectorAll('span')) as HTMLSpanElement[]
-        spans.forEach(sp => {
-          sp.style.outline = '1px dashed rgba(59,130,246,0.6)'
-          sp.style.pointerEvents = 'auto'
-        })
-        
-        // 监听选择结束事件
-        const onSelectionEnd = async () => {
-          const selection = window.getSelection()
-          if (!selection || selection.isCollapsed || !pdfDoc || !lastViewport.value) return
-          
-          // 获取选区的实际边界位置
-          const range = selection.getRangeAt(0)
-          const rects = range.getClientRects()
-          if (!rects.length) return
-          
-          const selectedText = selection.toString().trim()
-          if (!selectedText) return
-          
-          console.log('[underline:selection]', { 
-            selectedText,
-            rangeRects: Array.from(rects).map(rect => ({
-              left: rect.left, top: rect.top, width: rect.width, height: rect.height
-            }))
-          })
-          
-          ensurePageArray(pageNum.value)
-          
-          // 获取text-layer的位置信息
-          const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
-          if (!textLayer) return
-          
-          const textLayerRect = textLayer.getBoundingClientRect()
-          
-          // 为每个选区矩形添加下划线
-          for (const rect of rects) {
-            // 将客户端坐标转换为相对于text-layer的坐标
-            const relativeLeft = rect.left - textLayerRect.left
-            const relativeTop = rect.top - textLayerRect.top
-            const relativeBottom = relativeTop + rect.height
-            
-            // 转换为viewport坐标
-            const m = getOverlayMetrics()
-            if (!m) continue
-            
-            const vLeft = relativeLeft / m.sx
-            const vBottom = relativeBottom / m.sy
-            const vRight = (relativeLeft + rect.width) / m.sx
-            
-            // 转换为PDF坐标
-            const pLeft = lastViewport.value.convertToPdfPoint(vLeft, vBottom)
-            const pRight = lastViewport.value.convertToPdfPoint(vRight, vBottom)
-            
-            const ux = Math.min(pLeft[0], pRight[0])
-            const uy = Math.max(pLeft[1], pRight[1]) - 1.0
-            const uw = Math.max(1, Math.abs(pRight[0] - pLeft[0]))
-            const uh = 1.5
-            
-            annotations.value[pageNum.value].push({ 
-              id: genId(), 
-              page: pageNum.value, 
-              type: 'underline', 
-              x: ux, 
-              y: uy, 
-              w: uw, 
-              h: uh, 
-              color: strokeColor.value 
-            })
-            
-            console.log('[underline:add]', {
-              selectedText,
-              clientRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-              relativeRect: { left: relativeLeft, top: relativeTop, width: rect.width, height: rect.height },
-              underlinePdf: { x: ux, y: uy, w: uw, h: uh }
-            })
           }
           
-          // 清除选择
-          selection.removeAllRanges()
+          // 添加事件监听器
+          sp.addEventListener('mouseenter', mouseEnterHandler)
+          sp.addEventListener('mouseleave', mouseLeaveHandler)
+          sp.addEventListener('dblclick', dblClickHandler)
           
-          snapshot()
-          renderAnnotationsForCurrentPage(null as any)
-          scheduleAutoSave()
-        }
-        
-        // 监听鼠标松开事件，延迟执行以确保选择完成
-        textLayerDiv.addEventListener('mouseup', () => {
-          setTimeout(onSelectionEnd, 50)
+          // 保存引用以便后续清理
+          ;(sp as any)._replaceMouseEnterHandler = mouseEnterHandler
+          ;(sp as any)._replaceMouseLeaveHandler = mouseLeaveHandler
+          ;(sp as any)._replaceDblClickHandler = dblClickHandler
         })
       }
+      // 下划线模式的装饰和事件监听器现在在工具模式切换时处理，避免重复添加
     }
   } catch {}
   // sync overlays to the actual rendered canvas size on screen
@@ -1125,8 +1163,22 @@ async function exportPdf() {
         target.drawRectangle({ x: a.x, y: a.y, width: a.w, height: a.h, color: rgb(c.r, c.g, c.b) })
       } else if (a.type === 'image' && a.src) {
         try {
+          console.log('[export:image] processing image', {
+            id: a.id,
+            srcFormat: a.src.substring(0, 30) + '...',
+            position: { x: a.x, y: a.y },
+            size: { w: a.w, h: a.h },
+            rotation: a.rotationDeg
+          })
+          
           const pngBytes = dataUrlToBytes(a.src)
-          const png = await newPdf.embedPng(pngBytes).catch(async () => await newPdf.embedJpg(pngBytes))
+          console.log('[export:image] converted to bytes, length:', pngBytes.length)
+          
+          const png = await newPdf.embedPng(pngBytes).catch(async () => {
+            console.log('[export:image] PNG failed, trying JPG')
+            return await newPdf.embedJpg(pngBytes)
+          })
+          
           const rot = (a.rotationDeg || 0)
           const rad = rot * Math.PI / 180
           const cx = a.x + a.w / 2
@@ -1148,7 +1200,10 @@ async function exportPdf() {
           const maxY = Math.max(...ys)
           // draw unrotated image inside its axis-aligned bounding box as approximation
           target.drawImage(png, { x: minX, y: minY, width: maxX - minX, height: maxY - minY })
-        } catch {}
+          console.log('[export:image] successfully drawn to PDF')
+        } catch (e) {
+          console.error('[export:image] failed to process image:', e)
+        }
       } else if (a.type === 'path' && a.pts?.length) {
         // 近似为折线段
         const col = hexToRgb(a.color || '#f59e0b')
@@ -1352,9 +1407,10 @@ function onPickImageFile(e: Event) {
   if (!file) return
   const reader = new FileReader()
   reader.onload = () => {
-    // 使用原始文件二进制生成 object URL，避免 base64 膨胀和质量损失
-    const blob = new Blob([file], { type: file.type || 'image/*' })
-    const src = URL.createObjectURL(blob)
+    // 将图片转换为base64格式，确保导出时可以正确处理
+    const base64Result = reader.result as string
+    console.log('[image:load] converting to base64 for export compatibility')
+    
     const img = new Image()
     img.onload = () => {
       // place to page center immediately
@@ -1368,6 +1424,15 @@ function onPickImageFile(e: Event) {
       const id = genId()
       const defaultW = Math.min(200, img.naturalWidth)
       const defaultH = Math.round(defaultW * (img.naturalHeight / img.naturalWidth))
+      
+      console.log('[image:add]', {
+        id,
+        naturalSize: { width: img.naturalWidth, height: img.naturalHeight },
+        displaySize: { width: defaultW, height: defaultH },
+        position: { x: pdfPt[0], y: pdfPt[1] },
+        srcFormat: base64Result.substring(0, 20) + '...'
+      })
+      
       annotations.value[pageNum.value].push({
         id,
         page: pageNum.value,
@@ -1376,7 +1441,7 @@ function onPickImageFile(e: Event) {
         y: pdfPt[1],
         w: defaultW,
         h: defaultH,
-        src,
+        src: base64Result, // 使用base64格式，确保导出兼容
         rotationDeg: 0,
       })
       selectedAnnoId.value = id
@@ -1384,9 +1449,9 @@ function onPickImageFile(e: Event) {
       renderPage()
       scheduleAutoSave()
     }
-    img.src = src
+    img.src = base64Result
   }
-  reader.readAsArrayBuffer(file)
+  reader.readAsDataURL(file) // 改为readAsDataURL以获取base64格式
   input.value = ''
 }
 
@@ -1439,12 +1504,13 @@ function prevMatch() {
 onMounted(() => {
   // 不默认加载占位文件；请通过上传或后续提供 URL 加载
   // 初次进入或每次进入编辑模式时，保持整页适配，降低缩放差异带来的定位误差
-  watch(isEditingMode, async (v) => {
-    if (v) {
-      await nextTick()
-      fitPage()
-    }
-  }, { immediate: false })
+  // 注释掉自动fitPage以避免在绘制工具时改变缩放比例
+  // watch(isEditingMode, async (v) => {
+  //   if (v) {
+  //     await nextTick()
+  //     fitPage()
+  //   }
+  // }, { immediate: false })
   window.addEventListener('keydown', onKeyDownGlobal)
 })
 
@@ -1452,6 +1518,13 @@ watch(toolMode, (mode) => {
   const anno = document.getElementById('anno-overlay') as HTMLDivElement | null
   const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
   console.log('[toolMode] change', { to: mode })
+  
+  // 防止重复执行
+  if ((textLayer as any)._currentMode === mode) {
+    console.log('[toolMode] skipping duplicate mode change to:', mode)
+    return
+  }
+  (textLayer as any)._currentMode = mode
   if (anno) {
     if (mode === 'textSelect') {
       // 选择：overlay 空白穿透，注释元素依然可交互
@@ -1464,7 +1537,124 @@ watch(toolMode, (mode) => {
       // 替换：让文本层接管事件以捕获 span 的双击；overlay 空白穿透
       anno.style.pointerEvents = 'none'
       anno.style.cursor = 'text'
-      if (textLayer) { textLayer.style.pointerEvents = 'auto'; textLayer.style.userSelect = 'none' }
+      if (textLayer) { 
+        textLayer.style.pointerEvents = 'auto'; 
+        textLayer.style.userSelect = 'text';
+        
+        // 为原文替换模式添加文本装饰，无需重新渲染PDF
+        const spans = Array.from(textLayer.querySelectorAll('span')) as HTMLSpanElement[]
+        console.log('[replace:mode] found spans:', spans.length)
+        spans.forEach((sp, index) => {
+          console.log(`[replace:style] setting outline for span ${index}:`, sp.textContent?.substring(0, 20))
+          sp.style.outline = '1px dashed rgba(239,68,68,0.9)'
+          sp.style.background = (sp.style.background && sp.style.background !== 'transparent') ? sp.style.background : 'transparent'
+          sp.style.pointerEvents = 'auto'
+          sp.title = '双击替换此处文本'
+          console.log(`[replace:style] span ${index} outline set to:`, sp.style.outline)
+          
+          // 验证样式是否被正确应用
+          setTimeout(() => {
+            console.log(`[replace:verify] span ${index} outline after 100ms:`, sp.style.outline)
+          }, 100)
+          
+          // 创建事件处理函数
+          const mouseEnterHandler = () => { sp.style.background = 'rgba(239,68,68,0.08)' }
+          const mouseLeaveHandler = () => { sp.style.background = 'transparent' }
+          const dblClickHandler = (ev: Event) => {
+            ev.stopPropagation()
+            const vx = parseFloat(sp.dataset.x || '0')
+            const vy = parseFloat(sp.dataset.y || '0')
+            const vw = parseFloat(sp.dataset.w || '0')
+            const vh = parseFloat(sp.dataset.h || '0')
+            const p1 = lastViewport.value!.convertToPdfPoint(vx, vy)
+            const p2 = lastViewport.value!.convertToPdfPoint(vx + vw, vy + vh)
+            const x = Math.min(p1[0], p2[0])
+            const y = Math.min(p1[1], p2[1])
+            const w = Math.max(1, Math.abs(p2[0] - p1[0]))
+            const h = Math.max(1, Math.abs(p2[1] - p1[1]))
+            // 可视锚点：直接使用 span 的屏幕位置（已包含 text-layer 的 transform 缩放）
+            const host = canvasRef.value
+            if (!host) return
+            const hostRect = host.getBoundingClientRect()
+            const br = sp.getBoundingClientRect()
+            const cssLeft = br.left - hostRect.left
+            const cssTop = br.top - hostRect.top
+            const cssW = br.width
+            const cssH = br.height
+            const ovTop = { x: cssLeft, y: cssTop }
+            
+            console.log('[replace:dbl]', {
+              spanRectOverlay: { vx, vy, vw, vh },
+              pdfRect: { x, y, w, h },
+              anchorOverlay: { x: round3(ovTop.x), y: round3(ovTop.y) },
+              cssRect: { left: cssLeft, top: cssTop, width: cssW, height: cssH },
+              scale: scale.value,
+            })
+            
+            ensurePageArray(pageNum.value)
+            // 遮罩覆盖原文（使用可视 cssRect 反算到 PDF，并在下方适度加厚）
+            const padX = Math.round(cssW * 0.05)
+            const padTop = Math.round(cssH * 0.10)
+            const padBottom = Math.round(cssH * 0.30)
+            const ox1 = cssLeft - padX
+            const oy1 = cssTop - padTop
+            const ox2 = cssLeft + cssW + padX
+            const oy2 = cssTop + cssH + padBottom
+            const vp1 = overlayPointToViewportPoint(ox1, oy1)
+            const vp2 = overlayPointToViewportPoint(ox2, oy2)
+            const pdfA = lastViewport.value!.convertToPdfPoint(vp1.x, vp1.y)
+            const pdfB = lastViewport.value!.convertToPdfPoint(vp2.x, vp2.y)
+            const mx = Math.min(pdfA[0], pdfB[0])
+            const my = Math.min(pdfA[1], pdfB[1])
+            const mw = Math.max(1, Math.abs(pdfB[0] - pdfA[0]))
+            const mh = Math.max(1, Math.abs(pdfB[1] - pdfA[1]))
+            
+            // 放置替换文本，默认填入原文，进入编辑；字号按 overlay 高度反推
+            const id = genId()
+            const vhCss = parseFloat(sp.dataset.vhcss || '0')
+            const fs = Math.max(8, (vhCss > 0 ? vhCss : cssH) / (scale.value || 1))
+            
+            // 创建遮罩和文本注释
+            annotations.value[pageNum.value].push({ id: genId(), page: pageNum.value, type: 'mask', x: mx, y: my, w: mw, h: mh, color: '#ffffff' } as any)
+            
+            // 文本仍使用原 cssRect 顶点反算，避免随遮罩加厚下移
+            const vpTextLeftTop = overlayPointToViewportPoint(cssLeft, cssTop)
+            const vpTextLeftBottom = overlayPointToViewportPoint(cssLeft, cssTop + cssH)
+            const pdfTextTop = lastViewport.value!.convertToPdfPoint(vpTextLeftTop.x, vpTextLeftTop.y)
+            const pdfTextBottom = lastViewport.value!.convertToPdfPoint(vpTextLeftBottom.x, vpTextLeftBottom.y)
+            const textX = pdfTextTop[0]
+            const textY = Math.max(pdfTextTop[1], pdfTextBottom[1])
+            annotations.value[pageNum.value].push({ id, page: pageNum.value, type: 'text', x: textX, y: textY, w: 0, h: 0, text: sp.textContent || '', color: textColor.value, fontSize: fs, vx: round3(ovTop.x), vy: round3(ovTop.y), _scale: scale.value, _rotation: rotation.value, _ow: cssW, _oh: cssH })
+            snapshot()
+            
+            // 隐藏被双击的原文 span，避免与遮罩+新文本重叠
+            sp.style.opacity = '0'
+            sp.style.pointerEvents = 'none'
+            // 保存被隐藏的 span 引用到新文本注释上，便于后续恢复
+            const newTextAnno = annotations.value[pageNum.value][annotations.value[pageNum.value].length - 1]
+            ;(newTextAnno as any)._hiddenSpan = sp
+            editingAnnoId.value = id
+            // 只重新渲染注释层，不重新渲染PDF，保持缩放比例
+            renderAnnotationsForCurrentPage(null as any)
+            // 使用 nextTick 确保注释渲染完成后再打开编辑器
+            nextTick(() => openTextEditor(id))
+          }
+          
+          // 添加事件监听器
+          sp.addEventListener('mouseenter', mouseEnterHandler)
+          sp.addEventListener('mouseleave', mouseLeaveHandler)
+          sp.addEventListener('dblclick', (ev) => {
+            console.log('[replace:dblclick] span clicked:', sp.textContent?.substring(0, 20))
+            ev.preventDefault() // 阻止默认文本选择行为
+            dblClickHandler(ev)
+          })
+          
+          // 保存事件处理函数引用，便于后续清理
+          ;(sp as any)._replaceMouseEnterHandler = mouseEnterHandler
+          ;(sp as any)._replaceMouseLeaveHandler = mouseLeaveHandler
+          ;(sp as any)._replaceDblClickHandler = dblClickHandler
+        })
+      }
     } else if (mode === 'select') {
       // 编辑选择：overlay 接管事件，确保注释元素可交互
       anno.style.pointerEvents = 'auto'
@@ -1473,6 +1663,23 @@ watch(toolMode, (mode) => {
       // 确保注释元素及其控制元素可交互
       const nodes = anno.querySelectorAll<HTMLElement>('.anno, .resize-h, .del-btn')
       nodes.forEach(n => n.style.pointerEvents = 'auto')
+    } else if (mode === 'underline') {
+      // 下划线：让文本层接管事件以支持文本选择
+      anno.style.pointerEvents = 'none'
+      anno.style.cursor = 'text'
+      anno.classList.remove('eraser')
+      
+      console.log('[underline:mode] anno-overlay setup:', {
+        pointerEvents: anno.style.pointerEvents,
+        cursor: anno.style.cursor,
+        className: anno.className
+      })
+    } else if (mode === 'draw') {
+      // 绘图：overlay 接管事件，使用十字光标
+      anno.style.pointerEvents = 'auto'
+      anno.style.cursor = 'crosshair'
+      anno.style.userSelect = 'none' // 防止文本选择干扰
+      anno.classList.remove('eraser')
     } else {
       // 其他工具：overlay 接管事件
       anno.style.pointerEvents = 'auto'
@@ -1481,6 +1688,48 @@ watch(toolMode, (mode) => {
     }
   }
   if (textLayer) {
+    // 清理之前的下划线事件监听器
+    if ((textLayer as any)._underlineMouseUpHandler) {
+      textLayer.removeEventListener('mouseup', (textLayer as any)._underlineMouseUpHandler)
+      ;(textLayer as any)._underlineMouseUpHandler = null
+    }
+    
+    // 清理调试事件监听器
+    if ((textLayer as any)._debugMouseDown) {
+      textLayer.removeEventListener('mousedown', (textLayer as any)._debugMouseDown)
+      ;(textLayer as any)._debugMouseDown = null
+    }
+    
+    // 清理文本层的样式和事件监听器
+    const spans = textLayer.querySelectorAll('span') as NodeListOf<HTMLSpanElement>
+    console.log(`[toolMode:cleanup] mode=${mode}, cleaning ${spans.length} spans`)
+    spans.forEach((sp, index) => {
+      // 在replace模式下不清理样式，因为我们稍后会设置新的样式
+      if (mode !== 'replace') {
+        console.log(`[cleanup] clearing span ${index} outline (was: ${sp.style.outline})`)
+      sp.style.outline = ''
+      sp.style.pointerEvents = ''
+      sp.style.background = ''
+      sp.title = ''
+      } else {
+        console.log(`[cleanup] skipping style cleanup for replace mode, span ${index}`)
+      }
+      
+      // 清理替换模式的事件监听器
+      if ((sp as any)._replaceMouseEnterHandler) {
+        sp.removeEventListener('mouseenter', (sp as any)._replaceMouseEnterHandler)
+        ;(sp as any)._replaceMouseEnterHandler = null
+      }
+      if ((sp as any)._replaceMouseLeaveHandler) {
+        sp.removeEventListener('mouseleave', (sp as any)._replaceMouseLeaveHandler)
+        ;(sp as any)._replaceMouseLeaveHandler = null
+      }
+      if ((sp as any)._replaceDblClickHandler) {
+        sp.removeEventListener('dblclick', (sp as any)._replaceDblClickHandler)
+        ;(sp as any)._replaceDblClickHandler = null
+      }
+    })
+    
     // 文本选择工具：文本层可交互；其他工具禁用文本层
     if (mode === 'textSelect') {
       textLayer.style.pointerEvents = 'auto'
@@ -1493,17 +1742,139 @@ watch(toolMode, (mode) => {
       // 下划线模式：需要支持文本选择来精确添加下划线
       textLayer.style.pointerEvents = 'auto'
       textLayer.style.userSelect = 'text'
+      textLayer.style.cursor = 'text'  // 确保显示文本光标
+      
+      console.log('[underline:mode] setting up underline mode, textLayer styles:', {
+        pointerEvents: textLayer.style.pointerEvents,
+        userSelect: textLayer.style.userSelect,
+        cursor: textLayer.style.cursor
+      })
+      
+      // 为下划线模式添加文本装饰，无需重新渲染PDF
+      const spans = Array.from(textLayer.querySelectorAll('span')) as HTMLSpanElement[]
+      console.log('[underline:mode] found', spans.length, 'spans to decorate')
+      spans.forEach((sp, index) => {
+        sp.style.outline = '1px dashed rgba(59,130,246,0.6)'
+        sp.style.pointerEvents = 'auto'
+        sp.style.userSelect = 'text'  // 确保span也可以选择文本
+        if (index < 5) { // 只打印前5个span的调试信息
+          console.log(`[underline:span] ${index}:`, {
+            text: sp.textContent?.substring(0, 20),
+            outline: sp.style.outline,
+            pointerEvents: sp.style.pointerEvents,
+            userSelect: sp.style.userSelect
+          })
+        }
+      })
+      
+      // 添加下划线选择事件监听器
+      const onSelectionEnd = async () => {
+        const selection = window.getSelection()
+        if (!selection || selection.isCollapsed || !pdfDoc || !lastViewport.value) return
+        
+        // 获取选区的实际边界位置
+        const range = selection.getRangeAt(0)
+        const rects = range.getClientRects()
+        if (!rects.length) return
+        
+        const selectedText = selection.toString().trim()
+        if (!selectedText) return
+        
+        console.log('[underline:selection]', { 
+          selectedText,
+          rangeRects: Array.from(rects).map(rect => ({
+            left: rect.left, top: rect.top, width: rect.width, height: rect.height
+          }))
+        })
+        
+        // 处理每个选择矩形
+        for (const rect of rects) {
+          if (rect.width <= 0 || rect.height <= 0) continue
+          
+          // 获取canvas相对位置
+          const canvas = canvasRef.value
+          if (!canvas) continue
+          
+          const canvasRect = canvas.getBoundingClientRect()
+          const relativeLeft = rect.left - canvasRect.left
+          const relativeTop = rect.top - canvasRect.top
+          
+          // 转换为viewport坐标，然后转换为PDF坐标
+          const m = getOverlayMetrics()
+          if (!m) continue
+          
+          const vLeft = relativeLeft / m.sx
+          const vRight = (relativeLeft + rect.width) / m.sx
+          const vBottom = (relativeTop + rect.height) / m.sy
+          
+          // 转换为PDF坐标（下划线在文本底部）
+          const pLeft = lastViewport.value.convertToPdfPoint(vLeft, vBottom)
+          const pRight = lastViewport.value.convertToPdfPoint(vRight, vBottom)
+          
+          const ux = Math.min(pLeft[0], pRight[0])
+          const uy = Math.max(pLeft[1], pRight[1]) - 1.0
+          const uw = Math.max(1, Math.abs(pRight[0] - pLeft[0]))
+          const uh = 1.5
+          
+          // 添加下划线注释
+          if (!annotations.value[pageNum.value]) annotations.value[pageNum.value] = []
+          annotations.value[pageNum.value].push({ 
+            id: genId(), 
+            page: pageNum.value, 
+            type: 'underline', 
+            x: ux, 
+            y: uy, 
+            w: uw, 
+            h: uh, 
+            color: strokeColor.value 
+          })
+          
+          console.log('[underline:add]', {
+            selectedText,
+            clientRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+            relativeRect: { left: relativeLeft, top: relativeTop, width: rect.width, height: rect.height },
+            underlinePdf: { x: ux, y: uy, w: uw, h: uh }
+          })
+        }
+        
+        // 清除选择
+        selection.removeAllRanges()
+        
+        // 重新渲染注释层
+        renderAnnotationsForCurrentPage(null as any)
+        scheduleAutoSave()
+      }
+      
+      // 添加事件监听器
+      textLayer.addEventListener('mouseup', onSelectionEnd)
+      // 保存引用以便后续清理
+      ;(textLayer as any)._underlineMouseUpHandler = onSelectionEnd
+      
+      console.log('[underline:mode] event listener added to textLayer, handler saved as _underlineMouseUpHandler')
+      
+      // 添加额外的调试事件监听器
+      const debugMouseDown = (e: MouseEvent) => {
+        console.log('[underline:debug] mousedown on textLayer', {
+          target: (e.target as HTMLElement)?.tagName,
+          targetText: (e.target as HTMLElement)?.textContent?.substring(0, 20),
+          pointerEvents: (e.target as HTMLElement)?.style.pointerEvents,
+          userSelect: (e.target as HTMLElement)?.style.userSelect
+        })
+      }
+      textLayer.addEventListener('mousedown', debugMouseDown)
+      ;(textLayer as any)._debugMouseDown = debugMouseDown
     } else {
       textLayer.style.pointerEvents = 'none'
       textLayer.style.userSelect = 'none'
     }
   }
-  // 进入原文替换模式时，强制重渲，确保文本层带上可编辑装饰
-  if (mode === 'replace') {
-    try { renderPage() } catch {}
-  } else if (mode === 'underline') {
-    try { renderPage() } catch {}
-  }
+  // 进入特定模式时，避免重新渲染PDF以保持缩放比例
+  // 原文替换和下划线模式的装饰现在在文本层渲染时动态添加，无需强制重渲染
+  // if (mode === 'replace') {
+  //   try { renderPage() } catch {}
+  // } else if (mode === 'underline') {
+  //   try { renderPage() } catch {}
+  // }
 })
 
 // ===== In-page highlight helpers =====
@@ -1545,6 +1916,162 @@ function rectFromTransform(transform: number[], width: number, height: number) {
 function round3(n: number) {
   return Math.round(n * 1000) / 1000
 }
+
+// 合并相邻的文本span以改善文本选择体验
+function mergeAdjacentTextSpans(container: HTMLDivElement) {
+  const spans = Array.from(container.querySelectorAll('span')) as HTMLSpanElement[]
+  const tolerance = 12 // 稍微增加容差，因为PDF字符间距可能不均匀
+  const mergedSpans = new Set<HTMLSpanElement>()
+  
+  // 按行分组spans
+  const rowGroups: HTMLSpanElement[][] = []
+  spans.forEach(span => {
+    if (mergedSpans.has(span)) return
+    
+    const spanTop = parseFloat(span.style.top)
+    
+    // 找到所属行
+    let row = rowGroups.find(group => {
+      const firstInRow = group[0]
+      const rowTop = parseFloat(firstInRow.style.top)
+      return Math.abs(spanTop - rowTop) <= tolerance
+    })
+    
+    if (!row) {
+      row = []
+      rowGroups.push(row)
+    }
+    
+    row.push(span)
+  })
+  
+  // 为每行排序并尝试合并
+  rowGroups.forEach(row => {
+    // 按left位置排序
+    row.sort((a, b) => parseFloat(a.style.left) - parseFloat(b.style.left))
+    
+    for (let i = 0; i < row.length - 1; i++) {
+      const current = row[i]
+      if (mergedSpans.has(current)) continue
+      
+      const currentLeft = parseFloat(current.style.left)
+      const currentWidth = parseFloat(current.style.width || current.style.minWidth || '0')
+      let currentRight = currentLeft + currentWidth
+      
+      // 查找可以合并的相邻spans
+      const toMerge = [current]
+      for (let j = i + 1; j < row.length; j++) {
+        const next = row[j]
+        if (mergedSpans.has(next)) continue
+        
+        const nextLeft = parseFloat(next.style.left)
+        const gap = nextLeft - currentRight
+        
+        // 如果间距合理，可以合并
+        // 对于短文本（可能是标题），使用更宽松的合并条件
+        const isShortText = (current.textContent || '').length < 20 && (next.textContent || '').length < 20
+        const maxGap = isShortText ? tolerance * 3 : tolerance // 短文本允许更大间距
+        
+        if (gap <= maxGap) {
+          toMerge.push(next)
+          // 更新当前右边界用于继续检查
+          const nextWidth = parseFloat(next.style.width || next.style.minWidth || '0')
+          const nextRight = nextLeft + nextWidth
+          // 这里需要更新currentRight以便检查下一个span
+          currentRight = Math.max(currentRight, nextRight)
+        } else {
+          break // 间距太大，停止合并
+        }
+      }
+      
+      // 只有找到了可合并的span才进行合并
+      if (toMerge.length > 1) {
+        const leftmost = Math.min(...toMerge.map(s => parseFloat(s.style.left)))
+        const rightmost = Math.max(...toMerge.map(s => {
+          const left = parseFloat(s.style.left)
+          const width = parseFloat(s.style.width || s.style.minWidth || '0')
+          return left + width
+        }))
+        
+        // 合并文本，智能处理空格
+      let combinedText = ''
+        for (let k = 0; k < toMerge.length; k++) {
+          const spanText = (toMerge[k].textContent || '').trim()
+        if (spanText) {
+            if (combinedText) {
+            // 检查是否需要添加空格
+              const needSpace = !combinedText.endsWith(' ') && !spanText.startsWith(' ') &&
+                               /[a-zA-Z0-9]$/.test(combinedText) && /^[a-zA-Z0-9]/.test(spanText)
+            if (needSpace) combinedText += ' '
+          }
+          combinedText += spanText
+        }
+      }
+      
+        // 最终清理，但保留必要的空格
+        combinedText = combinedText.replace(/\s+/g, ' ').trim()
+        
+        // 更新第一个span
+      current.textContent = combinedText
+        // 应用相同的右偏移调整
+        const fontSize = parseFloat(current.style.fontSize) || 12
+        const charWidth = fontSize * 0.6
+        const rightOffset = charWidth * 1
+        current.style.left = `${leftmost + rightOffset}px`
+        
+        // 使用合理的宽度：span范围的总宽度 vs 测量宽度
+        const spanRangeWidth = rightmost - leftmost
+        
+        // 测量文本实际宽度
+      const tempMeasure = document.createElement('span')
+      tempMeasure.style.position = 'absolute'
+      tempMeasure.style.visibility = 'hidden'
+      tempMeasure.style.fontSize = current.style.fontSize
+        tempMeasure.style.fontFamily = 'Helvetica, Arial, sans-serif'
+      tempMeasure.style.whiteSpace = 'nowrap'
+      tempMeasure.textContent = combinedText
+      container.appendChild(tempMeasure)
+      const measuredWidth = tempMeasure.getBoundingClientRect().width
+      tempMeasure.remove()
+      
+        // 使用较大的那个宽度，确保完全覆盖
+        const finalWidth = Math.max(spanRangeWidth, measuredWidth + 5)
+        current.style.minWidth = `${finalWidth}px`
+        current.style.width = `${finalWidth}px`
+      
+      // 标记并移除其他span
+        for (let k = 1; k < toMerge.length; k++) {
+          mergedSpans.add(toMerge[k])
+          toMerge[k].remove()
+        }
+        
+        // console.log('[textLayer:merge]', {
+        //   mergedText: combinedText.length > 40 ? combinedText.substring(0, 40) + '...' : combinedText,
+        //   spanCount: toMerge.length,
+        //   spanRangeWidth: spanRangeWidth.toFixed(1),
+        //   measuredWidth: measuredWidth.toFixed(1),
+        //   finalWidth: finalWidth.toFixed(1),
+        //   position: { 
+        //     originalLeft: leftmost.toFixed(1), 
+        //     adjustedLeft: (leftmost + rightOffset).toFixed(1), 
+        //     top: parseFloat(current.style.top).toFixed(1) 
+        //   },
+        //   rightOffset: rightOffset.toFixed(1),
+        //   gaps: toMerge.slice(1).map((span, idx) => {
+        //     const prevRight = parseFloat(toMerge[idx].style.left) + parseFloat(toMerge[idx].style.width || '0')
+        //     const currentLeft = parseFloat(span.style.left)
+        //     return (currentLeft - prevRight).toFixed(1)
+        //   })
+        // })
+      }
+    }
+  })
+}
+
+
+
+
+
 
 // === Persistence helpers ===
 async function deriveDocKey(urlOrData: string | ArrayBuffer): Promise<string> {
@@ -1822,7 +2349,20 @@ async function renderAnnotationsForCurrentPage(_page: any) {
           ev.stopPropagation()
           const list = annotations.value[pageNum.value] || []
           const idx = list.findIndex(i => i.id === a.id)
-          if (idx >= 0) { snapshot(); list.splice(idx,1); selectedAnnoId.value=null; renderAnnotationsForCurrentPage(null as any); scheduleAutoSave() }
+          if (idx >= 0) { 
+            snapshot()
+            const anno = list[idx]
+            // 如果是替换生成的文本注释，恢复被隐藏的原文 span
+            if (anno.type === 'text' && (anno as any)._hiddenSpan) {
+              const hiddenSpan = (anno as any)._hiddenSpan as HTMLSpanElement
+              hiddenSpan.style.opacity = ''
+              hiddenSpan.style.pointerEvents = ''
+            }
+            list.splice(idx,1)
+            selectedAnnoId.value=null
+            renderAnnotationsForCurrentPage(null as any)
+            scheduleAutoSave()
+          }
         })
         overlay.appendChild(del)
       }
@@ -1864,12 +2404,9 @@ async function renderAnnotationsForCurrentPage(_page: any) {
         div.style.background = 'transparent'
       }
       } else {
-      // text: first render after creation uses stored viewport anchor to avoid timing drift
+      // text: 使用注释中存储的字体大小，确保一致性
       let vx: number, vy: number
       const fontPx = (a.fontSize || 14) * (scale.value)
-      // 若存在覆盖生成时记录的原始 overlay 高度，按其近似还原字号
-      const inferred = (a as any)._oh ? Math.max(8, ((a as any)._oh) / (scale.value || 1)) : null
-      const finalFontPx = inferred || fontPx
       if (typeof a.vx === 'number' && typeof a.vy === 'number' && a._scale === scale.value && a._rotation === rotation.value) {
         vx = a.vx
         vy = a.vy
@@ -1888,7 +2425,7 @@ async function renderAnnotationsForCurrentPage(_page: any) {
       div.style.left = `${leftPx}px`
       div.style.top = `${topPx}px`
       div.style.color = a.color || '#111827'
-      div.style.fontSize = `${finalFontPx}px`
+      div.style.fontSize = `${fontPx}px`
       div.textContent = a.text || ''
       // debug logs removed
       div.addEventListener('dblclick', (e) => {
@@ -2026,10 +2563,26 @@ function onAnnoMouseDown(ev: MouseEvent) {
     drawingPathPts = null
     console.log('[polygon] preview cleared due to tool switch', { toTool: toolMode.value })
   }
-  // 替换模式下：允许像编辑选择一样点击/框选；但 overlay 接管事件，文本层禁用点击，避免误触原生选区
-  if (toolMode.value === 'replace') {
-    const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
-    if (textLayer) { textLayer.style.pointerEvents = 'none'; textLayer.style.userSelect = 'none' }
+  // 根据不同工具模式设置文本层的交互属性
+  const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+  if (textLayer) {
+    if (toolMode.value === 'replace') {
+      // 替换模式：overlay 接管事件，文本层禁用点击，避免误触原生选区
+      textLayer.style.pointerEvents = 'none'
+      textLayer.style.userSelect = 'none'
+      console.log('[mousedown] disabled textLayer for replace mode')
+    } else if (toolMode.value === 'underline') {
+      // 下划线模式：确保文本层可以交互，支持文本选择
+      textLayer.style.pointerEvents = 'auto'
+      textLayer.style.userSelect = 'text'
+      console.log('[mousedown] ensured textLayer is interactive for underline mode')
+    } else if (toolMode.value === 'textSelect' as ToolMode) {
+      // 文本选择模式：确保文本层可以交互
+      textLayer.style.pointerEvents = 'auto'
+      textLayer.style.userSelect = 'text'
+      console.log('[mousedown] ensured textLayer is interactive for textSelect mode')
+    }
+    // 其他模式不修改文本层属性，保持工具模式切换时设置的状态
   }
   if (toolMode.value === 'eraser') {
     isErasing = true
@@ -2062,11 +2615,25 @@ function onAnnoMouseDown(ev: MouseEvent) {
         const list = annotations.value[pageNum.value] || []
         selectedAnnoIds.value.forEach(selId => {
           const a = list.find(i => i.id === selId)
-          if (a) draggingOriginsById[selId] = { x: a.x, y: a.y }
+          if (a) {
+            if ((a.type === 'path' || a.type === 'polygon') && a.pts && a.pts.length > 0) {
+              // 路径类型和多边形：记录所有点的原始位置
+              draggingOriginsById[selId] = { 
+                x: a.x, 
+                y: a.y,
+                pts: a.pts.map(pt => ({ x: pt.x, y: pt.y }))
+              }
+            } else {
+              // 其他类型：记录 x, y 坐标
+              draggingOriginsById[selId] = { x: a.x, y: a.y }
+            }
+          }
         })
       }
     } else {
-      // 空白处：开始框选以便多选编辑
+      // 点击空白区域：清除选中状态并开始框选
+      selectedAnnoIds.value = []
+      selectedAnnoId.value = null
       isBoxSelecting = true
       const vp = overlayPointToViewportPoint(x, y)
       const ov = viewportPointToOverlayPoint(vp.x, vp.y)
@@ -2086,7 +2653,7 @@ function onAnnoMouseDown(ev: MouseEvent) {
   if (toolMode.value === 'text') {
     ensurePageArray(pageNum.value)
     const id = genId()
-    // 使用最近一次 mousemove 记录的坐标，避免 click 事件坐标抖动
+    // 使用当前点击坐标，如果没有缓存则使用当前坐标
     const useOverlay = lastOverlayPoint || { x, y }
     const useViewport = lastViewportPoint || overlayPointToViewportPoint(useOverlay.x, useOverlay.y)
     const pdfFromCache = lastPdfPoint
@@ -2107,7 +2674,14 @@ function onAnnoMouseDown(ev: MouseEvent) {
       _scale: scale.value,
       _rotation: rotation.value,
     }
-    // debug log removed: [text:add]
+    console.log('[text:add]', {
+      id,
+      overlay: useOverlay,
+      viewport: useViewport,
+      pdf: pdfPt,
+      scale: scale.value,
+      rotation: rotation.value
+    })
     annotations.value[pageNum.value].push(anno)
     editingAnnoId.value = id
     renderPage().then(() => openTextEditor(id))
@@ -2115,6 +2689,7 @@ function onAnnoMouseDown(ev: MouseEvent) {
   }
   if (toolMode.value === 'draw') {
     // 开始记录路径（overlay 坐标）
+    ev.preventDefault() // 防止拖拽等默认行为影响光标
     drawingPathPts = []
     const ovPt = { x, y }
     drawingPathPts.push(ovPt)
@@ -2146,6 +2721,7 @@ function onAnnoMouseDown(ev: MouseEvent) {
       const hostRect = overlayDiv2.getBoundingClientRect()
       drawMoveListener = (ev2: MouseEvent) => {
         if (!drawingPathPts) return
+        ev2.preventDefault() // 防止拖拽等默认行为影响光标
         const px = ev2.clientX - hostRect.left
         const py = ev2.clientY - hostRect.top
         drawingPathPts.push({ x: px, y: py })
@@ -2294,9 +2870,19 @@ function onAnnoMouseMove(ev: MouseEvent) {
       const a = list.find(i => i.id === id)
       const origin = draggingOriginsById[id]
       if (a && origin) {
-        a.x = origin.x + dx
-        a.y = origin.y + dy
-        if (a.type === 'text') { a.vx = undefined; a.vy = undefined }
+        if ((a.type === 'path' || a.type === 'polygon') && a.pts && a.pts.length > 0 && origin.pts) {
+          // 路径类型（包括箭头）和多边形：使用记录的原始点位置计算偏移
+          a.pts.forEach((pt, index) => {
+            const originalPt = origin.pts![index]
+            pt.x = originalPt.x + dx
+            pt.y = originalPt.y + dy
+          })
+        } else {
+          // 其他类型：移动 x, y 坐标
+          a.x = origin.x + dx
+          a.y = origin.y + dy
+          if (a.type === 'text') { a.vx = undefined; a.vy = undefined }
+        }
       }
     })
     renderAnnotationsForCurrentPage(null as any)
@@ -2736,34 +3322,75 @@ function openTextEditor(id: string) {
     stored: { vx: a.vx, vy: a.vy, _ow: (a as any)._ow, _oh: (a as any)._oh, fontSize: a.fontSize },
     scale: scale.value,
   })
-  input.style.minWidth = '120px'
-  input.style.fontSize = `${(a.fontSize || 14) * (scale.value)}px`
+  // 使用原来红框的尺寸设置编辑器大小
+  const originalWidth = (a as any)._ow || 150  // 使用保存的原始宽度
+  const originalHeight = (a as any)._oh || (a.fontSize || 14) + 4  // 使用保存的原始高度
+  
+  input.style.minWidth = `${Math.max(originalWidth, 100)}px`  // 最小100px
+  input.style.width = `${Math.max(originalWidth, 100)}px`
+  input.style.fontSize = `${a.fontSize || 14}px`
   input.style.lineHeight = '1'
-  input.style.padding = '0 2px'
-  input.style.border = '1px solid #3b82f6'
+  input.style.padding = '2px 4px'  // 稍微增加内边距
+  input.style.border = '2px solid #3b82f6'  // 加粗边框，更明显
   input.style.boxSizing = 'border-box'
-  input.style.background = 'transparent'
+  input.style.background = 'white'
+  input.style.color = '#111827'
   input.style.resize = 'none'
   input.style.overflow = 'hidden'
-  // 限制单行输入高度为覆盖框高度（优先使用记录的 overlay 高度，且不再乘以 scale）
-  const lineH = Math.max(1, ((a as any)._oh || 0))
-  if (lineH > 0) {
-    input.style.height = `${lineH}px`
-    input.style.minHeight = `${lineH}px`
-    input.style.maxHeight = `${lineH}px`
-  } else {
-    const px = (a.fontSize || 14)
-    input.style.height = `${px}px`
-    input.style.minHeight = `${px}px`
-    input.style.maxHeight = `${px}px`
-  }
-  input.style.zIndex = '10'
+  // 设置输入框高度，使用原始高度
+  const fontSize = a.fontSize || 14
+  const inputHeight = Math.max(originalHeight, fontSize + 8, 24) // 确保足够的高度
+  input.style.height = `${inputHeight}px`
+  input.style.minHeight = `${inputHeight}px`
+  input.style.maxHeight = `${inputHeight}px`
+  input.style.zIndex = '1000'
   overlay.appendChild(input)
-  // 切换到编辑选择工具并聚焦输入框
-  toolMode.value = 'select'
-  input.focus()
+  console.log('[editor:created]', {
+    inputElement: input,
+    parentElement: overlay,
+    styles: {
+      left: input.style.left,
+      top: input.style.top,
+      width: input.style.minWidth,
+      height: input.style.height,
+      zIndex: input.style.zIndex,
+      background: input.style.background,
+      border: input.style.border
+    }
+  })
+  // 保持当前工具模式，不切换到编辑选择
+  // 使用延迟确保编辑器获得焦点
+  setTimeout(() => {
+    input.focus()
+    input.select() // 选中所有文本，方便用户编辑
+  }, 50)
+  
   if (!(a as any)._oh) autoResizeTextarea(input)
+  
+  // 跟踪用户是否真正编辑过内容
+  let hasBeenEdited = false
+  const originalValue = input.value
+  
+  // 防止编辑器立即失去焦点
+  let isUserInteracting = false
+  let interactionTimeout: number | null = null
+  
+  // 添加用户交互检测
+  input.addEventListener('mousedown', () => {
+    isUserInteracting = true
+    if (interactionTimeout) clearTimeout(interactionTimeout)
+    interactionTimeout = setTimeout(() => {
+      isUserInteracting = false
+    }, 300)
+  })
+  
   input.addEventListener('keydown', (e) => {
+    isUserInteracting = true
+    if (interactionTimeout) clearTimeout(interactionTimeout)
+    interactionTimeout = setTimeout(() => {
+      isUserInteracting = false
+    }, 300)
+    
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       commitTextEditor()
@@ -2772,14 +3399,69 @@ function openTextEditor(id: string) {
       cancelTextEditor()
     }
   })
-  input.addEventListener('blur', () => {
-    // 避免与 keydown Enter 竞争导致重复提交/渲染过程中节点已被移除
-    setTimeout(() => commitTextEditor(), 0)
+  
+  input.addEventListener('input', () => {
+    hasBeenEdited = true
+    isUserInteracting = true
+    if (interactionTimeout) clearTimeout(interactionTimeout)
+    interactionTimeout = setTimeout(() => {
+      isUserInteracting = false
+    }, 500) // 输入后延长交互时间
+    if (!(a as any)._oh) autoResizeTextarea(input)
   })
-  if (!(a as any)._oh) input.addEventListener('input', () => autoResizeTextarea(input))
+  
+  // 使用延迟处理blur事件，给用户足够时间进行编辑
+  let blurTimeout: number | null = null
+  
+  input.addEventListener('blur', () => {
+    console.log('[editor:blur] triggered, isUserInteracting:', isUserInteracting)
+    
+    // 如果用户正在交互，不处理blur事件
+    if (isUserInteracting) {
+      console.log('[editor:blur] user is interacting, ignoring blur event')
+      return
+    }
+    
+    // 清除之前的延迟处理
+    if (blurTimeout) {
+      clearTimeout(blurTimeout)
+    }
+    
+    // 延迟处理blur事件，给用户足够时间进行编辑
+    blurTimeout = setTimeout(() => {
+      // 再次检查用户是否在交互
+      if (isUserInteracting) {
+        console.log('[editor:blur:delayed] user is still interacting, ignoring')
+        return
+      }
+      
+      // 检查输入框是否仍然存在且没有焦点
+      const currentInput = document.getElementById('anno-editor') as HTMLTextAreaElement | null
+      if (!currentInput || document.activeElement !== currentInput) {
+        // 只有用户真正编辑过内容才自动提交
+        if (hasBeenEdited && input.value.trim() !== originalValue.trim()) {
+          console.log('[editor:blur:commit] auto-committing changes')
+          commitTextEditor()
+        } else {
+          // 没有编辑，直接取消
+          console.log('[editor:blur:cancel] no changes, cancelling')
+          cancelTextEditor()
+        }
+      }
+    }, 300) // 增加延迟时间，给双击和编辑操作足够的时间
+  })
+  
+  // 添加focus事件监听，清除blur延迟处理
+  input.addEventListener('focus', () => {
+    if (blurTimeout) {
+      clearTimeout(blurTimeout)
+      blurTimeout = null
+    }
+  })
 }
 
 function commitTextEditor() {
+  console.log('[editor:commit] starting, current toolMode:', toolMode.value)
   const input = document.getElementById('anno-editor') as HTMLTextAreaElement | null
   if (!input || !input.parentElement) return
   const list = annotations.value[pageNum.value] || []
@@ -2799,10 +3481,9 @@ function commitTextEditor() {
         a.y = pdfPt[1]
         a.vx = left
         a.vy = top
-        // 固定提交后用于渲染的字号为输入框高度对应的像素大小，避免再次放大
-        const px = parseFloat(input.style.height || '0')
-        if (px > 0) { a.fontSize = Math.max(8, px / (scale.value || 1)) }
+        // 保持用户设置的字体大小，不根据输入框高度重新计算
         // 同步 _oh，保持渲染/再次编辑一致
+        const px = parseFloat(input.style.height || '0')
         ;(a as any)._oh = px
         a._scale = scale.value
         a._rotation = rotation.value
@@ -2826,16 +3507,32 @@ function commitTextEditor() {
   editingAnnoId.value = null
   // 仅重绘注释层避免 PDF 重渲；并确保文本层被禁用，避免仍是文本光标
   renderAnnotationsForCurrentPage(null as any)
+  
+  // 重新应用当前工具模式的样式，确保红框不消失
+  nextTick(() => {
+    const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+    if (textLayer && (toolMode.value === 'replace' || toolMode.value === 'underline')) {
+      console.log('[editor:commit] reapplying', toolMode.value, 'mode styles after commit')
+      // 清除当前模式标记，强制重新应用
+      ;(textLayer as any)._currentMode = null
+      // 重新触发工具模式的样式应用
+      const currentMode = toolMode.value
+      toolMode.value = currentMode
+    }
+  })
+  
   // 恢复原文本节点可见
   const ov = document.getElementById('anno-overlay') as HTMLDivElement | null
   if (ov && a) {
     const node = ov.querySelector(`.anno.text[data-id="${a.id}"]`) as HTMLElement | null
     if (node) node.style.display = ''
   }
+  console.log('[editor:commit] completed, current toolMode:', toolMode.value)
   scheduleAutoSave()
 }
 
 function cancelTextEditor() {
+  console.log('[editor:cancel] starting, current toolMode:', toolMode.value)
   const input = document.getElementById('anno-editor') as HTMLTextAreaElement | null
   if (input) input.remove()
   // if it was a new empty annotation, remove it
@@ -2843,18 +3540,39 @@ function cancelTextEditor() {
   if (editingAnnoId.value) {
     const a = list.find(i => i.id === editingAnnoId.value)
     if (a && !a.text) {
+      // 如果是替换生成的文本注释且为空，恢复被隐藏的原文 span
+      if (a.type === 'text' && (a as any)._hiddenSpan) {
+        const hiddenSpan = (a as any)._hiddenSpan as HTMLSpanElement
+        hiddenSpan.style.opacity = ''
+        hiddenSpan.style.pointerEvents = ''
+      }
       const idx = list.findIndex(i => i.id === a.id)
       if (idx >= 0) list.splice(idx, 1)
     }
   }
   editingAnnoId.value = null
   renderAnnotationsForCurrentPage(null as any)
+  
+  // 重新应用当前工具模式的样式，确保红框不消失
+  nextTick(() => {
+    const textLayer = document.getElementById('text-layer') as HTMLDivElement | null
+    if (textLayer && (toolMode.value === 'replace' || toolMode.value === 'underline')) {
+      console.log('[editor:cancel] reapplying', toolMode.value, 'mode styles after cancel')
+      // 清除当前模式标记，强制重新应用
+      ;(textLayer as any)._currentMode = null
+      // 重新触发工具模式的样式应用
+      const currentMode = toolMode.value
+      toolMode.value = currentMode
+    }
+  })
+  
   // 恢复原文本节点可见
   const ov = document.getElementById('anno-overlay') as HTMLDivElement | null
   if (ov) {
     const node = ov.querySelector(`.anno.text[data-id]`) as HTMLElement | null
     if (node) node.style.display = ''
   }
+  console.log('[editor:cancel] completed, current toolMode:', toolMode.value)
 }
 
 function clearAllEdits() {
@@ -2887,7 +3605,16 @@ function deleteSelectedAnnotations() {
   
   ids.forEach(id => {
     const idx = list.findIndex(i => i.id === id)
-    if (idx >= 0) list.splice(idx, 1)
+    if (idx >= 0) {
+      const anno = list[idx]
+      // 如果是替换生成的文本注释，恢复被隐藏的原文 span
+      if (anno.type === 'text' && (anno as any)._hiddenSpan) {
+        const hiddenSpan = (anno as any)._hiddenSpan as HTMLSpanElement
+        hiddenSpan.style.opacity = ''
+        hiddenSpan.style.pointerEvents = ''
+      }
+      list.splice(idx, 1)
+    }
   })
   
   selectedAnnoIds.value = []
@@ -3091,7 +3818,7 @@ canvas { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: blo
 .hl-overlay { position: absolute; inset: 0; pointer-events: none; left: 0; top: 0; }
 .hl { position: absolute; background: rgba(250, 204, 21, 0.35); outline: 1px solid rgba(234, 179, 8, 0.6); }
 .hl.current { background: rgba(59, 130, 246, 0.35); outline-color: rgba(59, 130, 246, 0.7); }
-.anno-overlay { position: absolute; inset: 0; cursor: crosshair; left: 0; top: 0; }
+.anno-overlay { position: absolute; inset: 0; cursor: crosshair; left: 0; top: 0; z-index: 10; }
   .anno-overlay.eraser { cursor: none; }
 .anno { position: absolute; }
 /* 显示手工文本层的文本选中高亮 */
